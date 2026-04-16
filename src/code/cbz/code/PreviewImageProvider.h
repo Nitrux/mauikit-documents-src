@@ -23,77 +23,28 @@
 #define PREVIEWIMAGEPROVIDER_H
 
 #include <QQuickAsyncImageProvider>
-#include <QRunnable>
 
 /**
  * \brief Get file previews using KIO::PreviewJob
  *
- * NOTE: As this task is potentially heavy, make sure to mark any Image using this provider asynchronous
+ * NOTE: As this task is potentially heavy, make sure to mark any Image using
+ * this provider asynchronous.
+ *
+ * KIO::PreviewJob requires the Qt main-thread event loop to deliver its
+ * signals. The job is therefore created directly on the main thread inside
+ * the QQuickImageResponse constructor rather than inside a QRunnable.
  */
-class KFileItem;
-class KJob;
 class PreviewImageProvider : public QQuickAsyncImageProvider
 {
 public:
     explicit PreviewImageProvider();
     ~PreviewImageProvider() override;
 
-    /**
-     * \brief Get an image.
-     * 
-     * @param id The source of the image.
-     * @param requestedSize The required size of the final image.
-     * 
-     * @return an asynchronous image response
-     */
     QQuickImageResponse *requestImageResponse(const QString &id, const QSize &requestedSize) override;
+
 private:
     class Private;
-    Private* d;
+    Private *d;
 };
 
-/**
- * \brief A worker class which does the bulk of the work for PreviewImageProvider
- */
-class PreviewRunnable : public QObject, public QRunnable {
-    Q_OBJECT
-public:
-    explicit PreviewRunnable(const QString &id, const QSize &requestedSize);
-    ~PreviewRunnable() override;
-
-    void run() override;
-
-    /**
-     * Request that the preview worker abort what it's doing
-     */
-    Q_SLOT void abort();
-
-    /**
-     * \brief Emitted once the preview has been retrieved (successfully or not)
-     * @param image The preview image in the requested size (possibly a placeholder)
-     */
-    Q_SIGNAL void done(QImage image);
-    /**
-     *\brief Get an icon associated with the mimetype of the image as a fallback.
-     * 
-     * @param p Pointer to pixmap to write this fallback into.
-     */
-    Q_SLOT void updatePreview(const KFileItem&, const QPixmap& p);
-    /**
-     *\brief Get an icon associated with the mimetype of the image as a fallback.
-     * 
-     * @param item The image to write a fallback for.
-     */
-    Q_SLOT void fallbackPreview(const KFileItem& item);
-    /**
-     * \brief Set whether the preview generation is finished.
-     * 
-     * @param job The job to mark finished.
-     */
-    Q_SLOT void finishedPreview(KJob* job);
-private:
-    class Private;
-    Private* d;
-};
-
-#endif//PREVIEWIMAGEPROVIDER_H
+#endif // PREVIEWIMAGEPROVIDER_H
