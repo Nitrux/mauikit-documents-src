@@ -28,6 +28,8 @@ qt_add_resources(documents_QML_QRC code/poppler/img_assets.qrc)
 
 ecm_target_qml_sources(MauiKitDocuments${MAUI_MAJOR_VERSION} PATH poppler SOURCES
     controls.${QT_MAJOR_VERSION}/poppler/PDFViewer.qml)
+ecm_target_qml_sources(MauiKitDocuments${MAUI_MAJOR_VERSION} PATH cbz SOURCES
+    controls.${QT_MAJOR_VERSION}/cbz/ComicViewer.qml)
 
 target_sources(MauiKitDocuments${MAUI_MAJOR_VERSION}
     PRIVATE

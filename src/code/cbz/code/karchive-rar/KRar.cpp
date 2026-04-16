@@ -158,11 +158,15 @@ bool KRar::openArchive(QIODevice::OpenMode mode)
             {
                 // Ensure container directory exists, create otherwise
                 KArchiveDirectory *tdir = findOrCreate(path);
-                tdir->addEntry(kaentry);
+                if (!tdir->addEntryV2(kaentry)) {
+                    continue;
+                }
             }
             else
             {
-                rootDir()->addEntry(kaentry);
+                if (!rootDir()->addEntryV2(kaentry)) {
+                    continue;
+                }
             }
         }
     }

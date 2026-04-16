@@ -370,7 +370,8 @@ void CategoryEntriesModel::addCategoryEntry(const QString& categoryName, BookEnt
             desiredCategory = categoryName.left(splitPos);
         }
         CategoryEntriesModel* categoryModel = nullptr;
-        for(CategoryEntriesModel *existingModel : qAsConst(d->categoryModels))
+        const auto &categoryModels = d->categoryModels;
+        for (CategoryEntriesModel *existingModel : categoryModels)
         {
             if(QString::compare(existingModel->name(), desiredCategory, Qt::CaseInsensitive) == 0)
             {

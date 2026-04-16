@@ -53,6 +53,7 @@ void DocumentsPlugin::registerTypes(const char *uri)
     //Poppler stuff
     qmlRegisterType<PdfDocument>(uri, 1, 0, "Document");
     qmlRegisterType(componentUrl(QStringLiteral("poppler/PDFViewer.qml")), uri, 1, 0, "PDFViewer");
+    qmlRegisterType(componentUrl(QStringLiteral("cbz/ComicViewer.qml")), uri, 1, 0, "ComicViewer");
 
            //CB stuff
     qmlRegisterType<CategoryEntriesModel>(uri, 1, 0, "CategoryEntriesModel");
@@ -75,10 +76,8 @@ void DocumentsPlugin::initializeEngine(QQmlEngine *engine, const char *uri)
 
     qDebug() << "Initialize the MauiKit Documents image provider";
     /** IMAGE PROVIDERS **/
-    engine->addImageProvider("preview", new Thumbnailer());
-
-
-           //    engine->addImageProvider("preview", new PreviewImageProvider());
+    engine->addImageProvider("preview", new PreviewImageProvider());
+    engine->addImageProvider("pdfpreview", new Thumbnailer());
     engine->addImageProvider("comiccover", new ComicCoverImageProvider());
 }
 

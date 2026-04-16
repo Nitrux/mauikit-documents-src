@@ -1206,7 +1206,8 @@ bool ArchiveBookModel::loadCoMet(QStringList xmlDocuments, QObject *acbfData, QS
 #ifdef KFILEMETADATA_FOUND
     KFileMetaData::UserMetaData filedata(filename);
     AdvancedComicBookFormat::Document* acbfDocument = qobject_cast<AdvancedComicBookFormat::Document*>(acbfData);
-    for(const QString& xmlDocument : qAsConst(xmlDocuments)) {
+    const auto &xmlDocumentsRef = xmlDocuments;
+    for (const QString &xmlDocument : xmlDocumentsRef) {
         QMutexLocker locker(&archiveMutex);
         const KArchiveFile* archFile = d->archive->directory()->file(xmlDocument);
         QXmlStreamReader xmlReader(archFile->data());
@@ -1392,7 +1393,8 @@ bool ArchiveBookModel::loadCoMet(QStringList xmlDocuments, QObject *acbfData, QS
                         cover->setImageHref(url);
                         acbfDocument->metaData()->bookInfo()->setCoverpage(cover);
                         entries.removeAll(url);
-                        for(const QString& entry : qAsConst(entries)) {
+                        const auto &entriesRef = entries;
+                        for (const QString &entry : entriesRef) {
                             AdvancedComicBookFormat::Page* page = new AdvancedComicBookFormat::Page(acbfDocument);
                             page->setImageHref(entry);
                             acbfDocument->body()->addPage(page);

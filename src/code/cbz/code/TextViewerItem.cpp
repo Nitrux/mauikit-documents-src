@@ -99,7 +99,7 @@ public:
             } else if (fontWeight == QStringLiteral("lighter")) {
                 font.setWeight(QFont::Light);
             } else if (QString::number(fontWeight.toInt()) == fontWeight) {
-                font.setLegacyWeight(fontWeight.toInt());
+                font.setWeight(static_cast<QFont::Weight>(fontWeight.toInt()));
             }
             const QString fontStretch(style->fontStretch().toLower());
             if (fontStretch == QStringLiteral("")) {
@@ -654,6 +654,7 @@ void TextViewerItem::updatePolish()
 
 QSGNode * TextViewerItem::updatePaintNode(QSGNode* node, QQuickItem::UpdatePaintNodeData* data)
 {
+    Q_UNUSED(node)
     Q_UNUSED(data)
     // QQuickTextNode *n = static_cast<QQuickTextNode *>(node);
     // if (!n)
@@ -705,13 +706,13 @@ void TextViewerItem::hoverLeaveEvent(QHoverEvent* event)
 
 void TextViewerItem::mousePressEvent(QMouseEvent* event)
 {
-    d->clickedAnchor = d->getAnchor(event->localPos());
+    d->clickedAnchor = d->getAnchor(event->position());
     event->accept();
 }
 
 void TextViewerItem::mouseReleaseEvent(QMouseEvent* event)
 {
-    QPair<int, int> eventAnchor = d->getAnchor(event->localPos());
+    QPair<int, int> eventAnchor = d->getAnchor(event->position());
     if (eventAnchor.first > -1 && eventAnchor == d->clickedAnchor) {
         QTextLayout::FormatRange format = d->formats.value(eventAnchor.first).value(eventAnchor.second);
         Q_EMIT linkActivated(format.format.anchorHref());
