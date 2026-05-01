@@ -46,8 +46,8 @@ add_library(MauiKit${MAUI_MAJOR_VERSION}::Documents ALIAS MauiKitDocuments${MAUI
 
 generate_export_header(MauiKitDocuments${MAUI_MAJOR_VERSION} BASE_NAME Documents)
 set_target_properties(MauiKitDocuments${MAUI_MAJOR_VERSION} PROPERTIES
-    VERSION ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
+    VERSION ${MAUIKIT_SO_VERSION}
+    SOVERSION ${MAUIKIT_SO_VERSION}
     EXPORT_NAME "Documents")
 
 target_include_directories(MauiKitDocuments${MAUI_MAJOR_VERSION}
