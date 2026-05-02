@@ -93,7 +93,7 @@ Maui.Page
     footerColumn: Maui.ToolBar
     {
         visible: control.showSearchControls && control.searchVisible
-        width: parent.width
+        width: parent ? parent.width : 0
 
         middleContent: Maui.SearchField
         {
