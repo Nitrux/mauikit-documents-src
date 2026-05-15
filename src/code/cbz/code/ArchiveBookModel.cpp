@@ -561,7 +561,11 @@ bool ArchiveBookModel::saveBook()
         qApp->processEvents();
 
         QTemporaryFile tmpFile(this);
-        tmpFile.open();
+        if (!tmpFile.open()) {
+            qWarning() << "Failed to open temporary file for archive creation";
+            setProcessing(false);
+            return false;
+        }
         QString archiveFileName = tmpFile.fileName().append(".cbz");
         QFileInfo fileInfo(tmpFile);
         tmpFile.close();
