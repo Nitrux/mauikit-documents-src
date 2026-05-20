@@ -517,6 +517,8 @@ Maui.Page
                     Maui.Theme.colorSet: Maui.Theme.Complementary
                     Maui.Theme.inherit: false
                     padding: Maui.Style.defaultPadding
+                    horizontalAlignment: Text.AlignLeft
+                    verticalAlignment: Text.AlignVCenter
                     anchors.bottom: selectLayer.top
                     anchors.margins: Maui.Style.space.big
                     anchors.left: selectLayer.left
