@@ -38,14 +38,13 @@ Maui.Page
     readonly property int currentSearchResultIndex: __currentSearchResultIndex
     readonly property int searchResultsCount: __currentSearchResults.length
 
-    onPageScaleChanged:   Qt.callLater(_applyZoom)
-    onCurrentPageChanged: Qt.callLater(_applyZoom)
+    onOrientationChanged: _relayoutCurrentPage()
 
     Connections
     {
         target: _listView
-        function onWidthChanged() { Qt.callLater(control._applyZoom) }
-        function onHeightChanged() { Qt.callLater(control._applyZoom) }
+        function onWidthChanged() { control._relayoutCurrentPage() }
+        function onHeightChanged() { control._relayoutCurrentPage() }
     }
 
     property bool enableLassoSelection : true
@@ -144,6 +143,7 @@ Maui.Page
     {
         id: _listView
         anchors.fill: parent
+        clip: true
 
         model: Poppler.Document
         {
@@ -151,7 +151,13 @@ Maui.Page
 
             property bool isLoading: true
 
-            onPathChanged: control.pageScale = 1.0
+            onPathChanged:
+            {
+                control.pageScale = 1.0
+                _listView.contentX = 0
+                _listView.contentY = 0
+                _listView.currentIndex = 0
+            }
 
             onPagesLoaded:
             {
@@ -162,30 +168,27 @@ Maui.Page
         }
 
         orientation: ListView.Vertical
-        snapMode: ListView.SnapOneItem
+        snapMode: control.pageScale === 1.0 ? ListView.SnapOneItem : ListView.NoSnap
+        flickable.onContentXChanged: control._updateCurrentPage()
+        flickable.onContentYChanged: control._updateCurrentPage()
 
-        flickable.onMovementEnded:
-        {
-            var index = indexAt(_listView.contentX, _listView.contentY)
-            currentIndex = index
-        }
-
-        delegate: Maui.ImageViewer
+        delegate: Item
         {
             id: pageImg
-            clip: true
-            asynchronous: true
-            interactive: !control.enableLassoSelection || Maui.Handy.hasTransientTouchInput
+
             property bool panning: false
             property real panLastX: 0
             property real panLastY: 0
-            width: ListView.view.width
-            height: ListView.view.height
+
+            readonly property real fitScale: Math.min(ListView.view.width / model.width,
+                                                      ListView.view.height / model.height)
+            readonly property real pageWidth: model.width * fitScale * control.pageScale
+            readonly property real pageHeight: model.height * fitScale * control.pageScale
+            readonly property real pageOffsetY: pageSurface.y
+
+            width: Math.max(ListView.view.width, pageWidth)
+            height: Math.max(ListView.view.height, pageHeight)
             readonly property int page: index
-            cache: false
-            source: model.url
-            sourceSize.width: model.width * (1000 / model.width)
-            sourceSize.height: model.height * (1000 / model.height)
 
             function clamp(value, minValue, maxValue)
             {
@@ -194,73 +197,75 @@ Maui.Page
 
             function shouldPan(mouse)
             {
-                return zooming && (mouse.button === Qt.MiddleButton || (control.spacePressed && mouse.button === Qt.LeftButton))
+                return control.pageScale > 1.0
+                    && (mouse.button === Qt.MiddleButton || (control.spacePressed && mouse.button === Qt.LeftButton))
             }
 
             function panBy(deltaX, deltaY)
             {
-                const maxX = Math.max(0, contentWidth - width)
-                const maxY = Math.max(0, contentHeight - height)
-                contentX = clamp(contentX - deltaX, 0, maxX)
-                contentY = clamp(contentY - deltaY, 0, maxY)
+                const view = ListView.view
+                const maxX = Math.max(0, view.contentWidth - view.width)
+                const maxY = Math.max(0, view.contentHeight - view.height)
+                view.contentX = clamp(view.contentX - deltaX, 0, maxX)
+                view.contentY = clamp(view.contentY - deltaY, 0, maxY)
             }
 
             property alias selectionLayer: selectLayer
-
-            // Reset zoom when scrolling away so the zoomed content of a
-            // previous page never bleeds into the background of another page.
-            readonly property bool isCurrentPage: ListView.isCurrentItem
-            onIsCurrentPageChanged:
-            {
-                if (!isCurrentPage)
-                {
-                    contentWidth  = width
-                    contentHeight = height
-                    contentX = 0
-                    contentY = 0
-                }
-            }
 
             readonly property var links: model.links
             readonly property string selectedText: _menu.selectedText
             readonly property bool hasSelection: selectLayer.visible && selectLayer.width > 0 && selectLayer.height > 0
             readonly property rect selectionRect: Qt.rect(selectLayer.x, selectLayer.y, selectLayer.width, selectLayer.height)
             readonly property rect selectionPageRect: Qt.rect(
-                                                    pageImg.image.paintedWidth > 0 ? selectLayer.x / pageImg.image.paintedWidth : 0,
-                                                    pageImg.image.paintedHeight > 0 ? selectLayer.y / pageImg.image.paintedHeight : 0,
-                                                    pageImg.image.paintedWidth > 0 ? selectLayer.width / pageImg.image.paintedWidth : 0,
-                                                    pageImg.image.paintedHeight > 0 ? selectLayer.height / pageImg.image.paintedHeight : 0)
+                                                    pageImage.paintedWidth > 0 ? selectLayer.x / pageImage.paintedWidth : 0,
+                                                    pageImage.paintedHeight > 0 ? selectLayer.y / pageImage.paintedHeight : 0,
+                                                    pageImage.paintedWidth > 0 ? selectLayer.width / pageImage.paintedWidth : 0,
+                                                    pageImage.paintedHeight > 0 ? selectLayer.height / pageImage.paintedHeight : 0)
 
-            // When the built-in double-click zoom (via PinchArea's inner MouseArea)
-            // fires on the dark margins, sync pageScale to match so the slider
-            // reflects the actual zoom level.
-            onDoubleClicked: (mouse) => { _syncTimer.restart() }
-
-            Timer
+            Item
             {
-                id: _syncTimer
-                // zoomAnim uses Maui.Style.units.longDuration (~250 ms); wait longer
-                interval: 400
-                onTriggered:
+                id: pageSurface
+
+                x: (pageImg.width - width) / 2
+                y: pageImg.height > height ? (pageImg.height - height) / 2 : 0
+                width: pageImg.pageWidth
+                height: pageImg.pageHeight
+
+                Image
                 {
-                    if (!pageImg.ListView.isCurrentItem || pageImg.width <= 0) return
-                    const newScale = pageImg.contentWidth / pageImg.width
-                    if (Math.abs(newScale - control.pageScale) > 0.05)
-                        control.pageScale = newScale
+                    id: pageImage
+
+                    anchors.fill: parent
+                    asynchronous: true
+                    cache: false
+                    autoTransform: true
+                    fillMode: Image.PreserveAspectFit
+                    source: model.url
+                    sourceSize.width: model.width * (1000 / model.width)
+                    sourceSize.height: model.height * (1000 / model.height)
+                }
+
+                Maui.ProgressIndicator
+                {
+                    width: parent.width
+                    anchors.bottom: parent.bottom
+                    visible: pageImage.status === Image.Loading
                 }
             }
 
-            MouseArea
+            WheelHandler
             {
-                anchors.fill: parent
-                acceptedButtons: Qt.LeftButton
-                propagateComposedEvents: false
-                preventStealing: false
-                onPressed: (mouse) => mouse.accepted = false
-                onReleased: (mouse) => mouse.accepted = false
-                onClicked: (mouse) => mouse.accepted = false
-                onPressAndHold: (mouse) => mouse.accepted = false
-                onDoubleClicked: (mouse) => mouse.accepted = true
+                target: null
+                acceptedModifiers: Qt.ControlModifier
+
+                onWheel: (event) =>
+                {
+                    const steps = event.angleDelta.y !== 0
+                        ? event.angleDelta.y / 120
+                        : event.pixelDelta.y / 15
+                    control.zoomBy(steps * 0.1)
+                    event.accepted = true
+                }
             }
 
             MouseArea
@@ -270,7 +275,7 @@ Maui.Page
                 propagateComposedEvents: true
                 preventStealing: true
                 scrollGestureEnabled: false
-                cursorShape: pageImg.panning ? Qt.ClosedHandCursor : ((control.spacePressed && pageImg.zooming) ? Qt.OpenHandCursor : Qt.ArrowCursor)
+                cursorShape: pageImg.panning ? Qt.ClosedHandCursor : ((control.spacePressed && control.pageScale > 1.0) ? Qt.OpenHandCursor : Qt.ArrowCursor)
 
                 onPressed: (mouse) =>
                 {
@@ -326,10 +331,10 @@ Maui.Page
                 model: links
                 delegate: MouseArea
                 {
-                    x: Math.round(modelData.rect.x * parent.width)
-                    y: Math.round(modelData.rect.y * parent.height)
-                    width: Math.round(modelData.rect.width * parent.width)
-                    height: Math.round(modelData.rect.height * parent.height)
+                    x: pageSurface.x + Math.round(modelData.rect.x * pageSurface.width)
+                    y: pageSurface.y + Math.round(modelData.rect.y * pageSurface.height)
+                    width: Math.round(modelData.rect.width * pageSurface.width)
+                    height: Math.round(modelData.rect.height * pageSurface.height)
 
                     cursorShape: Qt.PointingHandCursor
                     onClicked: control.goTo(modelData.destination)
@@ -342,10 +347,8 @@ Maui.Page
 
                 property alias selectionLayer: selectLayer
 
-                parent: pageImg.image
-                height: pageImg.image.paintedHeight
-                width: pageImg.image.paintedWidth
-                anchors.centerIn: parent
+                parent: pageSurface
+                anchors.fill: parent
 
                 MouseArea
                 {
@@ -365,10 +368,10 @@ Maui.Page
                 {
                     visible: __currentSearchResult.page === index
                     color: control.searchHighlightColor
-                    x: Math.round(__currentSearchResult.rect.x * pageImg.image.paintedWidth)
-                    y: Math.round(__currentSearchResult.rect.y * pageImg.image.paintedHeight)
-                    width: Math.round(__currentSearchResult.rect.width * pageImg.image.paintedWidth)
-                    height: Math.round(__currentSearchResult.rect.height * pageImg.image.paintedHeight)
+                    x: Math.round(__currentSearchResult.rect.x * pageImage.paintedWidth)
+                    y: Math.round(__currentSearchResult.rect.y * pageImage.paintedHeight)
+                    width: Math.round(__currentSearchResult.rect.width * pageImage.paintedWidth)
+                    height: Math.round(__currentSearchResult.rect.height * pageImage.paintedHeight)
                 }
 
                 Maui.ContextualMenu
@@ -503,7 +506,7 @@ Maui.Page
                             {
                                 _menu.selectedText = poppler.getText(
                                     Qt.rect(selectLayer.x, selectLayer.y, selectLayer.width, selectLayer.height),
-                                    Qt.size(pageImg.image.paintedWidth, pageImg.image.paintedHeight),
+                                    Qt.size(pageImage.paintedWidth, pageImage.paintedHeight),
                                     pageImg.page)
                                 _menu.show()
                             }
@@ -525,7 +528,7 @@ Maui.Page
 
                     text: poppler.getText(
                         Qt.rect(selectLayer.x, selectLayer.y, selectLayer.width, selectLayer.height),
-                        Qt.size(pageImg.image.paintedWidth, pageImg.image.paintedHeight),
+                        Qt.size(pageImage.paintedWidth, pageImage.paintedHeight),
                         pageImg.page)
 
                     background: Rectangle
@@ -607,7 +610,76 @@ Maui.Page
 
     function goTo(destination)
     {
+        _listView.currentIndex = destination.page
         _listView.flickable.positionViewAtIndex(destination.page, ListView.Beginning)
+    }
+
+    function zoomBy(delta)
+    {
+        const oldScale = pageScale
+        const newScale = Math.max(1.0, Math.min(4.0, oldScale + delta))
+        if (Math.abs(newScale - oldScale) < 0.001)
+            return
+
+        const view = _listView.flickable
+        const anchorX = view.width / 2
+        const anchorY = view.height / 2
+        const page = view.itemAt(view.contentX + anchorX, view.contentY + anchorY)
+        const pageIndex = page ? page.page : view.currentIndex
+        const pagePositionX = page && page.width > 0
+            ? (view.contentX + anchorX - page.x) / page.width
+            : 0.5
+        const pagePositionY = page && page.height > 0
+            ? (view.contentY + anchorY - page.y) / page.height
+            : 0.5
+
+        pageScale = newScale
+
+        Qt.callLater(function()
+        {
+            view.forceLayout()
+
+            const resizedPage = view.itemAtIndex(pageIndex)
+            if (resizedPage)
+            {
+                const maxX = Math.max(0, view.contentWidth - view.width)
+                const maxY = Math.max(0, view.contentHeight - view.height)
+                view.contentX = Math.max(0, Math.min(resizedPage.x + pagePositionX * resizedPage.width - anchorX, maxX))
+                view.contentY = Math.max(0, Math.min(resizedPage.y + pagePositionY * resizedPage.height - anchorY, maxY))
+            }
+
+            control._updateCurrentPage()
+        })
+    }
+
+    function _updateCurrentPage()
+    {
+        const view = _listView.flickable
+        const index = view.indexAt(view.contentX + view.width / 2,
+                                   view.contentY + view.height / 2)
+        if (index >= 0 && index !== view.currentIndex)
+            view.currentIndex = index
+    }
+
+    function _relayoutCurrentPage()
+    {
+        const view = _listView.flickable
+        const page = Math.max(0, view.currentIndex)
+
+        Qt.callLater(function()
+        {
+            view.forceLayout()
+            view.positionViewAtIndex(page, ListView.Beginning)
+
+            if (view.orientation === ListView.Vertical)
+                view.contentX = 0
+            else
+                view.contentY = 0
+
+            view.contentX = Math.max(0, Math.min(view.contentX, Math.max(0, view.contentWidth - view.width)))
+            view.contentY = Math.max(0, Math.min(view.contentY, Math.max(0, view.contentHeight - view.height)))
+            control._updateCurrentPage()
+        })
     }
 
     signal searchNotFound
@@ -705,51 +777,35 @@ Maui.Page
 
     function __scrollTo(destination)
     {
-        if (destination.page !== currentPage)
-            _listView.flickable.positionViewAtIndex(destination.page, ListView.Beginning)
+        goTo(destination)
 
-        var i = _listView.flickable.itemAt(_listView.width / 2, _listView.contentY + _listView.height / 2)
-        if (i === null)
-            i = _listView.flickable.itemAt(_listView.width / 2, _listView.contentY + _listView.height / 2 + _listView.spacing)
+        Qt.callLater(function()
+        {
+            const page = _listView.flickable.itemAtIndex(destination.page)
+            if (!page)
+                return
 
-        var pageHeight = control.height
-        var pageY = i.y - _listView.contentY
+            const resultTop = page.y + page.pageOffsetY + Math.round(destination.rect.top * page.pageHeight)
+            const resultBottom = page.y + page.pageOffsetY + Math.round(destination.rect.bottom * page.pageHeight)
+            const visibleTop = _listView.contentY
+            const visibleBottom = visibleTop + _listView.height
 
-        var bottomDistance = _listView.height - (pageY + Math.round(destination.rect.bottom * pageHeight))
-        var topDistance = pageY + Math.round(destination.rect.top * pageHeight)
-
-        if (bottomDistance < 0)
-            _listView.contentY -= bottomDistance - _listView.spacing
-        else if (topDistance < 0)
-            _listView.contentY += topDistance - _listView.spacing
+            if (resultBottom > visibleBottom)
+                _listView.contentY += resultBottom - visibleBottom + _listView.spacing
+            else if (resultTop < visibleTop)
+                _listView.contentY = Math.max(0, resultTop - _listView.spacing)
+        })
     }
 
     function previousPage()
     {
         if (_listView.currentIndex > 0)
-            _listView.currentIndex = _listView.currentIndex - 1
+            goTo({ page: _listView.currentIndex - 1, top: 0 })
     }
 
     function nextPage()
     {
         if (_listView.currentIndex + 1 < poppler.pages)
-            _listView.currentIndex = _listView.currentIndex + 1
-    }
-
-    function _applyZoom()
-    {
-        const page = _listView.flickable.currentItem
-        if (!page) return
-
-        const newW = page.width  * pageScale
-        const newH = page.height * pageScale
-        const scaleRatio = page.contentWidth > 0 ? newW / page.contentWidth : 1
-        const cx = page.contentX + page.width  / 2
-        const cy = page.contentY + page.height / 2
-
-        page.contentWidth  = newW
-        page.contentHeight = newH
-        page.contentX = Math.max(0, Math.min(cx * scaleRatio - page.width  / 2, newW - page.width))
-        page.contentY = Math.max(0, Math.min(cy * scaleRatio - page.height / 2, newH - page.height))
+            goTo({ page: _listView.currentIndex + 1, top: 0 })
     }
 }
