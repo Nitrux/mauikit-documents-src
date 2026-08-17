@@ -18,7 +18,7 @@ Maui.Page
 
     footBar.leftContent: ToolButton
     {
-        icon.name: "view-dual-symbolic"
+        icon.name: "two-pages"
         checked: control.twoPagesMode
         onClicked: control.twoPagesMode = !control.twoPagesMode
     }

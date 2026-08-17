@@ -381,7 +381,7 @@ Maui.Page
 
                     MenuItem
                     {
-                        icon.name: "edit-copy-symbolic"
+                        icon.name: "edit-copy"
                         text: i18n("Copy")
                         enabled: _menu.selectedText.length
                         onTriggered: Maui.Handy.copyTextToClipboard(_menu.selectedText)
