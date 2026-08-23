@@ -12,6 +12,9 @@
 #include <QVariant>
 #include "quazip/quazip.h"
 
+/**
+ *  Loads a CBZ comic archive and exposes its page list and cover details.
+ */
 class CBZReader : public QObject
 {
     Q_OBJECT

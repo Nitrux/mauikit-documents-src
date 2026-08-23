@@ -23,6 +23,8 @@
 #include <QQuickItem>
 
 /**
+ *  Fits styled paragraphs into an arbitrary polygon.
+ *
  * A QQuickItem which fits a set of paragraphs of text with a given style into an arbitrary polygon
  * Particularly, this is designed to render data from AdvancedComicBookFormat::Textarea instances.
  */

@@ -13,6 +13,12 @@
 #include "quazip/quazip.h"
 //#include "../qhttpserver/qhttpresponse.h"
 
+/**
+ *  Loads an EPUB archive and extracts its metadata and navigation tree.
+ *
+ * load() parses the package and navigation documents; hash and title identify
+ * the loaded book, and getCoverInfo() returns thumbnail and full-cover details.
+ */
 class EpubReader : public QObject
 {
     Q_OBJECT

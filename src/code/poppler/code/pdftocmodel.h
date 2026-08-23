@@ -30,6 +30,12 @@ public:
     int level = 0;
 };
 
+/**
+ *  Flattens a PDF outline into title, page-index, and nesting-level rows.
+ *
+ * setDocument() rebuilds the model from the Poppler document outline. get()
+ * returns one row as a map for QML consumers.
+ */
 class PdfTocModel : public QAbstractListModel
 {
     Q_OBJECT

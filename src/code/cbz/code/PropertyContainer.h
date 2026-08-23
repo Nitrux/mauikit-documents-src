@@ -26,6 +26,8 @@
 #include <QVariant>
 
 /**
+ *  Exposes QObject dynamic properties through QML-callable methods.
+ *
  * The only purpose of this class is to expose the dynamic property
  * system of Qt to QML, so we can set and get properties on a generic
  * object. It is a little bit of a hack, but QML deliberately does

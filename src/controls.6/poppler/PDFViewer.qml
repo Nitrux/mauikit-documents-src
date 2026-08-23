@@ -5,6 +5,18 @@ import QtQuick.Layouts
 import org.mauikit.controls as Maui
 import org.mauikit.documents as Poppler
 
+/**
+ *  org.mauikit.controls.Page
+ *  Displays, navigates, searches, and selects text in a PDF document.
+ *
+ * Set path or call open() to load a document. currentPage, totalPages, tocModel,
+ * nextPage(), previousPage(), and goTo() provide navigation. pageScale and
+ * zoomBy() control magnification. search() maintains the current result state,
+ * while selectedText, clearSelection(), and copySelection() expose selection.
+ *
+ * The supportsForms, supportsAnnotations, and supportsSavingChanges capability
+ * flags are currently false, and saveChanges() therefore performs no write.
+ */
 Maui.Page
 {
     id: control

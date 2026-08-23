@@ -29,6 +29,13 @@
 
 // typedef std::list<std::unique_ptr<Poppler::Page>> PdfPagesList;
 
+/**
+ *  Loads a PDF and exposes its pages, metadata, outline, and text APIs.
+ *
+ * Each model row represents one page and provides its dimensions, rendering
+ * URL, and links. Locked documents can be retried with unlock(); search() and
+ * getText() provide page-level text access.
+ */
 class PdfDocument : public QAbstractListModel
 {
     Q_OBJECT

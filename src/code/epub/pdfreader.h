@@ -13,6 +13,12 @@
 #include <poppler/qt5/poppler-qt5.h>
 #include "../qhttpserver/qhttpresponse.h"
 
+/**
+ *  Loads a PDF for the document-reader service and extracts its metadata.
+ *
+ * The reader exposes a stable content hash, title, rendered cover information,
+ * table of contents, and HTTP response helpers for serving page data.
+ */
 class PDFReader : public QObject
 {
     Q_OBJECT

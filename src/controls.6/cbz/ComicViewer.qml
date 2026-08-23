@@ -4,6 +4,14 @@ import QtQuick.Controls
 import org.mauikit.controls as Maui
 import org.mauikit.documents as Docs
 
+/**
+ *  org.mauikit.controls.Page
+ *  Displays a CBZ comic as one- or two-page horizontal spreads.
+ *
+ * Set path to load an archive. twoPagesMode controls whether each viewport shows
+ * one or two pages, orientation controls list direction, and currentPage reports
+ * the visible page index.
+ */
 Maui.Page
 {
     id: control
