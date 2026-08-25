@@ -216,7 +216,10 @@ Maui.Page
             function panBy(deltaX, deltaY)
             {
                 const view = ListView.view
-                const maxX = Math.max(0, view.contentWidth - view.width)
+                const contentWidth = Math.max(view.contentWidth, pageImg.x + pageImg.width)
+                if (view.contentWidth < contentWidth)
+                    view.contentWidth = contentWidth
+                const maxX = Math.max(0, contentWidth - view.width)
                 const maxY = Math.max(0, view.contentHeight - view.height)
                 view.contentX = clamp(view.contentX - deltaX, 0, maxX)
                 view.contentY = clamp(view.contentY - deltaY, 0, maxY)
@@ -654,7 +657,10 @@ Maui.Page
             const resizedPage = view.itemAtIndex(pageIndex)
             if (resizedPage)
             {
-                const maxX = Math.max(0, view.contentWidth - view.width)
+                const contentWidth = Math.max(view.contentWidth, resizedPage.x + resizedPage.width)
+                if (view.contentWidth < contentWidth)
+                    view.contentWidth = contentWidth
+                const maxX = Math.max(0, contentWidth - view.width)
                 const maxY = Math.max(0, view.contentHeight - view.height)
                 view.contentX = Math.max(0, Math.min(resizedPage.x + pagePositionX * resizedPage.width - anchorX, maxX))
                 view.contentY = Math.max(0, Math.min(resizedPage.y + pagePositionY * resizedPage.height - anchorY, maxY))
@@ -676,20 +682,37 @@ Maui.Page
     function _relayoutCurrentPage()
     {
         const view = _listView.flickable
-        const page = Math.max(0, view.currentIndex)
+        const anchorX = view.contentX + view.width / 2
+        const anchorY = view.contentY + view.height / 2
+        const pageItem = view.itemAt(anchorX, anchorY) || view.currentItem
+        const page = pageItem ? pageItem.page : Math.max(0, view.currentIndex)
+        const pagePositionX = pageItem && pageItem.width > 0
+            ? (anchorX - pageItem.x) / pageItem.width
+            : 0.5
+        const pagePositionY = pageItem && pageItem.height > 0
+            ? (anchorY - pageItem.y) / pageItem.height
+            : 0.5
 
         Qt.callLater(function()
         {
             view.forceLayout()
-            view.positionViewAtIndex(page, ListView.Beginning)
 
-            if (view.orientation === ListView.Vertical)
-                view.contentX = 0
+            const resizedPage = view.itemAtIndex(page)
+            if (resizedPage)
+            {
+                const contentWidth = Math.max(view.contentWidth, resizedPage.x + resizedPage.width)
+                if (view.contentWidth < contentWidth)
+                    view.contentWidth = contentWidth
+                const maxX = Math.max(0, contentWidth - view.width)
+                const maxY = Math.max(0, view.contentHeight - view.height)
+                view.contentX = Math.max(0, Math.min(resizedPage.x + pagePositionX * resizedPage.width - view.width / 2, maxX))
+                view.contentY = Math.max(0, Math.min(resizedPage.y + pagePositionY * resizedPage.height - view.height / 2, maxY))
+            }
             else
-                view.contentY = 0
+            {
+                view.positionViewAtIndex(page, ListView.Beginning)
+            }
 
-            view.contentX = Math.max(0, Math.min(view.contentX, Math.max(0, view.contentWidth - view.width)))
-            view.contentY = Math.max(0, Math.min(view.contentY, Math.max(0, view.contentHeight - view.height)))
             control._updateCurrentPage()
         })
     }
