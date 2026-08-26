@@ -18,71 +18,129 @@
  */
 
 #include <QQuickImageProvider>
-#include <QDebug>
+#include <QMutexLocker>
+#include <QStringList>
+#include <limits>
 
 #include "pdfimageprovider.h"
 
-PdfImageProvider::PdfImageProvider(Poppler::Document *pdfDocument)
+QMutex &popplerRenderMutex()
+{
+    static QMutex mutex;
+    return mutex;
+}
+
+PdfImageProvider::PdfImageProvider(const std::shared_ptr<PdfImageProviderState> &state)
     : QQuickImageProvider(QQuickImageProvider::Image, QQuickImageProvider::ForceAsynchronousImageLoading)
-    , document(pdfDocument)
+    , providerState(state)
 {
 }
 
-QImage PdfImageProvider::requestImage(const QString & id, QSize * size, const QSize & requestedSize)
+QImage PdfImageProvider::requestImage(const QString &id, QSize *size, const QSize &requestedSize)
 {
-    // If the requestedSize.width is 0, avoid Poppler rendering
-    // FIXME: Actually it works correctly, but an error is anyway shown in the application output.
-//    if (requestedSize.width() > 0)
-//    {
-    qDebug() << "REQUESTED PDF" << id ;
+    if (!providerState)
+        return {};
 
-        const QString type = id.section("/", 0, 0);
-        QImage result;
-        std::unique_ptr<Poppler::Page> page;
+    const QStringList parts = id.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    if (parts.size() < 2 || parts.at(0) != QLatin1String("page"))
+        return {};
 
-        if (type == "page")
+    bool pageOk = false;
+    const int pageNumber = parts.at(1).toInt(&pageOk);
+    if (!pageOk || pageNumber < 0)
+        return {};
+
+    const bool isCropRequest = parts.size() >= 8
+        && (parts.at(2) == QLatin1String("tile") || parts.at(2) == QLatin1String("region"));
+
+    int renderWidth = 0;
+    int cropX = 0;
+    int cropY = 0;
+    int cropWidth = 0;
+    int cropHeight = 0;
+
+    if (isCropRequest)
+    {
+        bool renderWidthOk = false;
+        bool xOk = false;
+        bool yOk = false;
+        bool widthOk = false;
+        bool heightOk = false;
+        renderWidth = parts.at(3).toInt(&renderWidthOk);
+        cropX = parts.at(4).toInt(&xOk);
+        cropY = parts.at(5).toInt(&yOk);
+        cropWidth = parts.at(6).toInt(&widthOk);
+        cropHeight = parts.at(7).toInt(&heightOk);
+
+        if (!renderWidthOk || !xOk || !yOk || !widthOk || !heightOk
+            || renderWidth <= 0 || cropX < 0 || cropY < 0 || cropWidth <= 0 || cropHeight <= 0)
+            return {};
+    }
+
+    QMutexLocker locker(&providerState->mutex);
+
+    // Check the image cache before touching Poppler. Zooming and panning
+    // revisit regions frequently, and creating a Page object is needlessly
+    // expensive for an image that is already available.
+    if (isCropRequest)
+    {
+        if (QImage *cached = providerState->tileCache.object(id))
         {
-            int numPage = id.section("/", 1, 1).toInt();
-
-            // Useful for debugging, keep commented unless you need it.
-              qDebug() << "Page" << numPage + 1 << "requested";
-
-//            if(numPage + 1 > document->numPages())
-//                numPage = 0;
-
-            page = document->page(numPage);
-            if(!page)
-            {
-                return result;
-            }
-
-            // size->setHeight(page->pageSize().height());
-            // size->setWidth(page->pageSize().width());
-
-            // QSizeF pageSizePhys;
-            QSizeF pageSize = page->pageSizeF();
-
-            // pageSizePhys.setWidth(pageSize.width() / 72);
-            // pageSizePhys.setHeight(pageSize.height() / 72);
-
-            // auto resH = (requestedSize.isValid() ? requestedSize.height() : size->height()) / pageSizePhys.height() ;
-            // auto resW = (requestedSize.isValid() ? requestedSize.width() : size->width()) / pageSizePhys.width() ;
-            // Useful for debugging, keep commented unless you need it.
-
-//            qDebug() << "Requested size :" << requestedSize.width() << ";" << requestedSize.height();
-//            qDebug() << "Size 1:" << size->width() << ";" << size->height();
-//            qDebug() << "Size :" << pageSizePhys.width() << ";" << pageSizePhys.height();
-//            qDebug() << "Resolution :" << res;
-
-            double res = requestedSize.width() / (pageSize.width() / 72);
-            result = page->renderToImage(res, res);
-            // result = page->renderToImage(resW, resH);
-
-            *size = result.size();
-            // Render the page to QImage
+            if (size)
+                *size = cached->size();
+            return *cached;
         }
-//    }
+    }
 
-    // Requested size is 0, so return a null image.
+    QMutexLocker renderLocker(&popplerRenderMutex());
+    Poppler::Document *document = providerState->document;
+    if (!document)
+        return {};
+
+    std::unique_ptr<Poppler::Page> page = document->page(pageNumber);
+    if (!page)
+        return {};
+
+    const QSizeF pageSize = page->pageSizeF();
+    if (pageSize.width() <= 0 || pageSize.height() <= 0)
+        return {};
+
+    if (isCropRequest)
+    {
+        const double resolution = renderWidth / (pageSize.width() / 72.0);
+        const int renderedWidth = qMax(1, qRound(pageSize.width() / 72.0 * resolution));
+        const int renderedHeight = qMax(1, qRound(pageSize.height() / 72.0 * resolution));
+        const int tileX = qBound(0, cropX, renderedWidth);
+        const int tileY = qBound(0, cropY, renderedHeight);
+        const int tileWidth = qMin(cropWidth, renderedWidth - tileX);
+        const int tileHeight = qMin(cropHeight, renderedHeight - tileY);
+
+        if (tileWidth <= 0 || tileHeight <= 0)
+            return {};
+
+        QImage result = page->renderToImage(resolution, resolution,
+                                             tileX, tileY, tileWidth, tileHeight);
+        if (size)
+            *size = result.size();
+
+        if (!result.isNull())
+        {
+            const qsizetype bytes = result.sizeInBytes();
+            const int cost = static_cast<int>(qMin<qsizetype>(bytes, std::numeric_limits<int>::max()));
+            if (cost > 0)
+                providerState->tileCache.insert(id, new QImage(result), cost);
+        }
+
+        return result;
+    }
+
+    const int requestedWidth = requestedSize.width();
+    if (requestedWidth <= 0)
+        return {};
+
+    const double resolution = requestedWidth / (pageSize.width() / 72.0);
+    QImage result = page->renderToImage(resolution, resolution);
+    if (size)
+        *size = result.size();
     return result;
 }

@@ -19,8 +19,14 @@
 
 #include "pdfdocument.h"
 #include "pdfimageprovider.h"
+#include <poppler/qt6/poppler-version.h>
+#include <poppler/qt6/poppler-form.h>
 
 #include <QDebug>
+#include <QFileInfo>
+#include <QMetaType>
+#include <QMutexLocker>
+#include <QSaveFile>
 #include <QQmlEngine>
 #include <QQmlContext>
 #include <QUuid>
@@ -34,6 +40,7 @@ PdfDocument::PdfDocument(QAbstractListModel *parent):
   , m_path("")
   , m_id(QString("poppler-%1").arg(InstanceCount++))
   , m_providersNumber(1)
+  , m_providerState(std::make_shared<PdfImageProviderState>())
   , m_tocModel(nullptr)
 {
     // qRegisterMetaType<PdfPagesList>("PdfPagesList");
@@ -118,44 +125,76 @@ bool PdfDocument::loadDocument(const QString &pathName, const QString &password,
         return false;
     }
 
-    m_document = Poppler::Document::load(pathName, password.toUtf8(), userPassword.toUtf8());
-
-    if (!m_document)
+    if (m_modified)
     {
-        qDebug() << "ERROR : Can't open the document located at " + pathName;
-        Q_EMIT error("Can't open the document located at " + pathName);
+        m_modified = false;
+        Q_EMIT modifiedChanged();
+    }
+    m_supportsForms = false;
+    m_supportsAnnotations = false;
+    m_supportsSavingChanges = false;
+    Q_EMIT capabilitiesChanged();
+    ++m_renderRevision;
+    Q_EMIT renderRevisionChanged();
 
-        this->m_isValid = false;
-        Q_EMIT this->isValidChanged();
+    if (m_providerState)
+    {
+        QMutexLocker locker(&m_providerState->mutex);
+        m_providerState->document = nullptr;
+        m_providerState->tileCache.clear();
+    }
+
+    {
+        QMutexLocker popplerLocker(&popplerRenderMutex());
+        m_document = Poppler::Document::load(pathName, password.toUtf8(), userPassword.toUtf8());
+
+        if (!m_document)
+        {
+            qDebug() << "ERROR : Can't open the document located at " + pathName;
+            Q_EMIT error("Can't open the document located at " + pathName);
+
+            this->m_isValid = false;
+            Q_EMIT this->isValidChanged();
 
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
-        delete m_document;
+            delete m_document;
 #endif
-        return false;
+            return false;
+        }
+
+        m_document->setRenderHint(Poppler::Document::Antialiasing, true);
+        m_document->setRenderHint(Poppler::Document::TextAntialiasing, true);
+        m_document->setRenderHint(Poppler::Document::HideAnnotations, false);
+
+        if (m_document->isLocked())
+        {
+            qDebug() << "ERROR : Can't open the document located at beacuse it is locked" + pathName;
+            Q_EMIT this->documentLocked();
+            Q_EMIT this->isLockedChanged();
+
+            this->m_isValid = false;
+            Q_EMIT this->isValidChanged();
+
+            return false;
+        }
+
+        this->pages = this->m_document->numPages();
+        this->m_supportsForms = this->m_document->formType() == Poppler::Document::AcroForm;
+        this->m_supportsAnnotations = true;
+        this->m_supportsSavingChanges = true;
     }
 
-    m_document->setRenderHint(Poppler::Document::Antialiasing, true);
-    m_document->setRenderHint(Poppler::Document::TextAntialiasing, true);
-
-    if (m_document->isLocked())
     {
-        qDebug() << "ERROR : Can't open the document located at beacuse it is locked" + pathName;
-        Q_EMIT this->documentLocked();
-        Q_EMIT this->isLockedChanged();
-
-        this->m_isValid = false;
-        Q_EMIT this->isValidChanged();
-
-        return false;
+        QMutexLocker locker(&m_providerState->mutex);
+        m_providerState->document = m_document.get();
     }
-
-    this->pages = this->m_document->numPages();
 
     qDebug() << "Document loaded successfully !";
 
     Q_EMIT this->pagesCountChanged();
     Q_EMIT this->titleChanged();
     Q_EMIT this->isLockedChanged();
+    Q_EMIT capabilitiesChanged();
 
     this->m_isValid = true;
     Q_EMIT this->isValidChanged();
@@ -172,6 +211,8 @@ bool PdfDocument::loadDocument(const QString &pathName, const QString &password,
     beginResetModel();
     loadPages();
     endResetModel();
+    Q_EMIT formFieldsChanged();
+    Q_EMIT annotationsChanged();
 
     return true;
 }
@@ -231,6 +272,436 @@ QString PdfDocument::id() const
     return m_id;
 }
 
+static QString formFieldType(const Poppler::FormField *field)
+{
+    if (!field)
+        return QString();
+
+    switch (field->type())
+    {
+    case Poppler::FormField::FormText:
+        return QStringLiteral("text");
+    case Poppler::FormField::FormChoice:
+    {
+        const auto choice = dynamic_cast<const Poppler::FormFieldChoice *>(field);
+        return choice && choice->choiceType() == Poppler::FormFieldChoice::ListBox
+            ? QStringLiteral("listbox") : QStringLiteral("combobox");
+    }
+    case Poppler::FormField::FormButton:
+    {
+        const auto button = dynamic_cast<const Poppler::FormFieldButton *>(field);
+        if (!button)
+            return QStringLiteral("button");
+        if (button->buttonType() == Poppler::FormFieldButton::CheckBox)
+            return QStringLiteral("checkbox");
+        if (button->buttonType() == Poppler::FormFieldButton::Radio)
+            return QStringLiteral("radio");
+        return QStringLiteral("button");
+    }
+    case Poppler::FormField::FormSignature:
+        return QStringLiteral("signature");
+    }
+
+    return QString();
+}
+
+QVariantList PdfDocument::formFields() const
+{
+    QVariantList result;
+    QMutexLocker popplerLocker(&popplerRenderMutex());
+    if (!m_document)
+        return result;
+
+    for (int pageNumber = 0; pageNumber < m_document->numPages(); ++pageNumber)
+    {
+        const auto page = m_document->page(pageNumber);
+        if (!page)
+            continue;
+
+        const auto fields = page->formFields();
+        for (const auto &field : fields)
+        {
+            if (!field)
+                continue;
+
+            QVariantMap item{
+                {QStringLiteral("page"), pageNumber},
+                {QStringLiteral("id"), field->id()},
+                {QStringLiteral("name"), field->name()},
+                {QStringLiteral("qualifiedName"), field->fullyQualifiedName()},
+                {QStringLiteral("uiName"), field->uiName()},
+                {QStringLiteral("type"), formFieldType(field.get())},
+                {QStringLiteral("rect"), field->rect()},
+                {QStringLiteral("readOnly"), field->isReadOnly()},
+                {QStringLiteral("visible"), field->isVisible()},
+                {QStringLiteral("printable"), field->isPrintable()}
+            };
+
+            if (const auto text = dynamic_cast<const Poppler::FormFieldText *>(field.get()))
+            {
+                item[QStringLiteral("value")] = text->text();
+                item[QStringLiteral("multiline")] = text->textType() == Poppler::FormFieldText::Multiline;
+                item[QStringLiteral("password")] = text->isPassword();
+                item[QStringLiteral("maximumLength")] = text->maximumLength();
+            }
+            else if (const auto choice = dynamic_cast<const Poppler::FormFieldChoice *>(field.get()))
+            {
+                QVariantList currentChoices;
+                for (const int choiceIndex : choice->currentChoices())
+                    currentChoices.append(choiceIndex);
+
+                item[QStringLiteral("choices")] = choice->choices();
+                item[QStringLiteral("currentChoices")] = currentChoices;
+                item[QStringLiteral("editable")] = choice->isEditable();
+                item[QStringLiteral("multiSelect")] = choice->multiSelect();
+                item[QStringLiteral("value")] = choice->editChoice();
+            }
+            else if (const auto button = dynamic_cast<const Poppler::FormFieldButton *>(field.get()))
+            {
+                item[QStringLiteral("checked")] = button->state();
+                item[QStringLiteral("caption")] = button->caption();
+            }
+
+            result.append(item);
+        }
+    }
+
+    return result;
+}
+
+static QString annotationType(Poppler::Annotation::SubType type)
+{
+    switch (type)
+    {
+    case Poppler::Annotation::AText: return QStringLiteral("text");
+    case Poppler::Annotation::ALine: return QStringLiteral("line");
+    case Poppler::Annotation::AGeom: return QStringLiteral("geometry");
+    case Poppler::Annotation::AHighlight: return QStringLiteral("highlight");
+    case Poppler::Annotation::AStamp: return QStringLiteral("stamp");
+    case Poppler::Annotation::AInk: return QStringLiteral("ink");
+    case Poppler::Annotation::ACaret: return QStringLiteral("caret");
+    case Poppler::Annotation::AFileAttachment: return QStringLiteral("file");
+    case Poppler::Annotation::ASound: return QStringLiteral("sound");
+    case Poppler::Annotation::AMovie: return QStringLiteral("movie");
+    case Poppler::Annotation::AScreen: return QStringLiteral("screen");
+    case Poppler::Annotation::AWidget: return QStringLiteral("widget");
+    case Poppler::Annotation::ARichMedia: return QStringLiteral("richMedia");
+    case Poppler::Annotation::ALink: return QStringLiteral("link");
+    }
+
+    return QStringLiteral("unknown");
+}
+
+QVariantList PdfDocument::annotations() const
+{
+    QVariantList result;
+    QMutexLocker popplerLocker(&popplerRenderMutex());
+    if (!m_document)
+        return result;
+
+    for (int pageNumber = 0; pageNumber < m_document->numPages(); ++pageNumber)
+    {
+        const auto page = m_document->page(pageNumber);
+        if (!page)
+            continue;
+
+        const auto pageAnnotations = page->annotations();
+        for (int annotationIndex = 0; annotationIndex < static_cast<int>(pageAnnotations.size()); ++annotationIndex)
+        {
+            const auto &annotation = pageAnnotations.at(annotationIndex);
+            if (!annotation || annotation->subType() == Poppler::Annotation::AWidget || annotation->subType() == Poppler::Annotation::ALink)
+                continue;
+
+            const QString uniqueName = annotation->uniqueName().isEmpty()
+                ? QStringLiteral("%1:%2").arg(pageNumber).arg(annotationIndex)
+                : annotation->uniqueName();
+            const auto style = annotation->style();
+            result.append(QVariantMap{
+                {QStringLiteral("page"), pageNumber},
+                {QStringLiteral("index"), annotationIndex},
+                {QStringLiteral("id"), uniqueName},
+                {QStringLiteral("type"), annotationType(annotation->subType())},
+                {QStringLiteral("rect"), annotation->boundary()},
+                {QStringLiteral("contents"), annotation->contents()},
+                {QStringLiteral("author"), annotation->author()},
+                {QStringLiteral("color"), style.color()},
+                {QStringLiteral("opacity"), style.opacity()}
+            });
+        }
+    }
+
+    return result;
+}
+
+bool PdfDocument::setFormFieldValue(int pageNumber, int fieldId, const QVariant &value)
+{
+    bool changed = false;
+    {
+        QMutexLocker popplerLocker(&popplerRenderMutex());
+        if (!m_document || !m_document->okToFillForm() || pageNumber < 0 || pageNumber >= m_document->numPages())
+            return false;
+
+        const auto page = m_document->page(pageNumber);
+        if (!page)
+            return false;
+
+        const auto fields = page->formFields();
+        for (const auto &field : fields)
+        {
+            if (!field || field->id() != fieldId || field->isReadOnly())
+                continue;
+
+            if (const auto text = dynamic_cast<Poppler::FormFieldText *>(field.get()))
+            {
+                const QString newText = value.toString();
+                if (text->text() != newText)
+                {
+                    text->setText(newText);
+                    text->setAppearanceText(newText);
+                    changed = true;
+                }
+            }
+            else if (const auto choice = dynamic_cast<Poppler::FormFieldChoice *>(field.get()))
+            {
+                if (choice->isEditable() && value.userType() == QMetaType::QString)
+                {
+                    const QString newText = value.toString();
+                    if (choice->editChoice() != newText)
+                    {
+                        choice->setEditChoice(newText);
+#if POPPLER_VERSION_MAJOR > 24 || (POPPLER_VERSION_MAJOR == 24 && POPPLER_VERSION_MINOR >= 8)
+                        choice->setAppearanceChoiceText(newText);
+#endif
+                        changed = true;
+                    }
+                }
+                else
+                {
+                    QList<int> selected;
+                    if (value.canConvert<QVariantList>())
+                    {
+                        for (const auto &entry : value.toList())
+                            selected.append(entry.toInt());
+                    }
+                    else if (value.canConvert<int>())
+                    {
+                        selected.append(value.toInt());
+                    }
+
+                    if (selected != choice->currentChoices())
+                    {
+                        choice->setCurrentChoices(selected);
+#if POPPLER_VERSION_MAJOR > 24 || (POPPLER_VERSION_MAJOR == 24 && POPPLER_VERSION_MINOR >= 8)
+                        if (!selected.isEmpty())
+                            choice->setAppearanceChoiceText(choice->choices().value(selected.first()));
+#endif
+                        changed = true;
+                    }
+                }
+            }
+            else if (const auto button = dynamic_cast<Poppler::FormFieldButton *>(field.get()))
+            {
+                const bool state = value.toBool();
+                if (button->state() != state)
+                {
+                    button->setState(state);
+                    changed = true;
+                }
+            }
+            break;
+        }
+    }
+
+    if (changed)
+        markModified();
+    return changed;
+}
+
+bool PdfDocument::setAnnotationProperties(int pageNumber, int annotationIndex, const QVariantMap &properties)
+{
+    bool changed = false;
+    {
+        QMutexLocker popplerLocker(&popplerRenderMutex());
+        if (!m_document || !m_document->okToAddNotes() || pageNumber < 0 || pageNumber >= m_document->numPages())
+            return false;
+
+        const auto page = m_document->page(pageNumber);
+        if (!page)
+            return false;
+
+        const auto pageAnnotations = page->annotations();
+        if (annotationIndex < 0 || annotationIndex >= static_cast<int>(pageAnnotations.size()))
+            return false;
+
+        auto *annotation = pageAnnotations.at(annotationIndex).get();
+        if (!annotation || annotation->subType() == Poppler::Annotation::AWidget || annotation->subType() == Poppler::Annotation::ALink)
+            return false;
+
+        if (properties.contains(QStringLiteral("contents")))
+        {
+            const QString contents = properties.value(QStringLiteral("contents")).toString();
+            if (annotation->contents() != contents)
+            {
+                annotation->setContents(contents);
+                changed = true;
+            }
+        }
+        if (properties.contains(QStringLiteral("author")))
+        {
+            const QString author = properties.value(QStringLiteral("author")).toString();
+            if (annotation->author() != author)
+            {
+                annotation->setAuthor(author);
+                changed = true;
+            }
+        }
+        if (properties.contains(QStringLiteral("rect")))
+        {
+            const QRectF boundary = properties.value(QStringLiteral("rect")).toRectF().normalized();
+            if (annotation->boundary() != boundary)
+            {
+                annotation->setBoundary(boundary);
+                changed = true;
+            }
+        }
+        if (properties.contains(QStringLiteral("color")) || properties.contains(QStringLiteral("opacity")))
+        {
+            auto style = annotation->style();
+            if (properties.contains(QStringLiteral("color")))
+                style.setColor(properties.value(QStringLiteral("color")).value<QColor>());
+            if (properties.contains(QStringLiteral("opacity")))
+                style.setOpacity(properties.value(QStringLiteral("opacity")).toDouble());
+            annotation->setStyle(style);
+            changed = true;
+        }
+    }
+
+    if (changed)
+        markModified();
+    return changed;
+}
+
+bool PdfDocument::addTextAnnotation(int pageNumber, const QRectF &rect, const QString &contents, const QString &author)
+{
+    {
+        QMutexLocker popplerLocker(&popplerRenderMutex());
+        if (!m_document || !m_document->okToAddNotes() || pageNumber < 0 || pageNumber >= m_document->numPages() || rect.isEmpty())
+            return false;
+
+        const auto page = m_document->page(pageNumber);
+        if (!page)
+            return false;
+
+        auto *annotation = new Poppler::TextAnnotation(Poppler::TextAnnotation::InPlace);
+        annotation->setBoundary(rect.normalized());
+        annotation->setContents(contents);
+        annotation->setAuthor(author);
+        page->addAnnotation(annotation);
+        delete annotation;
+    }
+
+    markModified();
+    return true;
+}
+
+bool PdfDocument::removeAnnotation(int pageNumber, int annotationIndex)
+{
+    {
+        QMutexLocker popplerLocker(&popplerRenderMutex());
+        if (!m_document || !m_document->okToAddNotes() || pageNumber < 0 || pageNumber >= m_document->numPages())
+            return false;
+
+        const auto page = m_document->page(pageNumber);
+        if (!page)
+            return false;
+
+        auto pageAnnotations = page->annotations();
+        if (annotationIndex < 0 || annotationIndex >= static_cast<int>(pageAnnotations.size()))
+            return false;
+
+        auto *annotation = pageAnnotations.at(annotationIndex).get();
+        if (!annotation || annotation->subType() == Poppler::Annotation::AWidget || annotation->subType() == Poppler::Annotation::ALink)
+            return false;
+
+        annotation = pageAnnotations.at(annotationIndex).release();
+        page->removeAnnotation(annotation);
+    }
+
+    markModified();
+    return true;
+}
+
+void PdfDocument::markModified()
+{
+    const bool wasModified = m_modified;
+    m_modified = true;
+    ++m_renderRevision;
+    if (!wasModified)
+        Q_EMIT modifiedChanged();
+    Q_EMIT renderRevisionChanged();
+    Q_EMIT formFieldsChanged();
+    Q_EMIT annotationsChanged();
+
+    if (m_providerState)
+    {
+        QMutexLocker locker(&m_providerState->mutex);
+        m_providerState->tileCache.clear();
+    }
+}
+
+bool PdfDocument::saveChanges()
+{
+    return saveToPath(m_path.toLocalFile());
+}
+
+bool PdfDocument::saveChangesAs(const QUrl &outputPath)
+{
+    if (outputPath.isEmpty() || !outputPath.isLocalFile())
+        return false;
+    return saveToPath(outputPath.toLocalFile());
+}
+
+bool PdfDocument::saveToPath(const QString &outputPath)
+{
+    if (outputPath.isEmpty())
+        return false;
+
+    QSaveFile output(outputPath);
+    if (!output.open(QIODevice::WriteOnly))
+    {
+        Q_EMIT error(QStringLiteral("Unable to open the PDF output file: %1").arg(outputPath));
+        return false;
+    }
+
+    bool converted = false;
+    {
+        QMutexLocker popplerLocker(&popplerRenderMutex());
+        if (!m_document)
+            return false;
+
+        auto converter = m_document->pdfConverter();
+        if (!converter)
+            return false;
+
+        converter->setOutputDevice(&output);
+        converter->setPDFOptions(converter->pdfOptions() | Poppler::PDFConverter::WithChanges);
+        converted = converter->convert();
+    }
+
+    if (!converted || !output.commit())
+    {
+        Q_EMIT error(QStringLiteral("Unable to save the modified PDF: %1").arg(outputPath));
+        return false;
+    }
+
+    if (m_modified)
+    {
+        m_modified = false;
+        Q_EMIT modifiedChanged();
+    }
+    return true;
+}
+
 static QVariantMap convertDestination(const Poppler::LinkDestination& destination)
 {
     QVariantMap result;
@@ -248,6 +719,7 @@ bool PdfDocument::loadPages()
     if (!m_document)
         return false;
 
+    QMutexLocker popplerLocker(&popplerRenderMutex());
     loadProvider();
     qDebug() << m_document->title() << m_document->numPages();
 
@@ -321,6 +793,7 @@ void PdfDocument::unlock(const QString &ownerPassword, const QString &password)
 QVariantList PdfDocument::search(int page, const QString &text, Qt::CaseSensitivity caseSensitivity)
 {
     QVariantList result;
+    QMutexLocker popplerLocker(&popplerRenderMutex());
     if (!m_document)
     {
         qWarning() << "Poppler plugin: no document to search";
@@ -334,6 +807,9 @@ QVariantList PdfDocument::search(int page, const QString &text, Qt::CaseSensitiv
     }
 
     auto p = m_document->page(page);
+    if (!p)
+        return result;
+
     auto searchResult = p->search(text, caseSensitivity == Qt::CaseInsensitive ? Poppler::Page::IgnoreCase : Poppler::Page::NoSearchFlags);
 
     auto pageSize = p->pageSizeF();
@@ -346,45 +822,47 @@ QVariantList PdfDocument::search(int page, const QString &text, Qt::CaseSensitiv
 
 QString PdfDocument::getText(const QRectF &rect, const QSize &pageSize, int page)
 {
+    QMutexLocker popplerLocker(&popplerRenderMutex());
     if (!m_document)
     {
         qWarning() << "Poppler plugin: no document to gather text";
         return QString();
     }
-    
+
     if (page >= m_document->numPages() || page < 0)
     {
         qWarning() << "Poppler plugin: get text page" << page << "isn't in a document";
         return QString();
     }
-    
-    
+
+    if (pageSize.width() <= 0 || pageSize.height() <= 0 || rect.width() <= 0 || rect.height() <= 0)
+        return QString();
+
+
     auto p = m_document->page(page);
-    
-    
+    if (!p)
+        return QString();
+
+
     auto newRect = QRectF(rect.x() * p->pageSize().width()/pageSize.width(),
                           rect.y() * p->pageSize().height()/pageSize.height(), 
                           rect.width() * p->pageSize().width() / pageSize.width(),
                           rect.height() * p->pageSize().height() / pageSize.height());
-    
-    qDebug() << "Sizes:" << rect << pageSize << QSize(p->pageSize().width(), p->pageSize().height()) << newRect;
-    
+
+
      auto text = p->text(newRect);
-     
+
      return text;
 }
 
 void PdfDocument::loadProvider()
 {
-    // WORKAROUND: QQuickImageProvider should create multiple threads to load more images at the same time.
-    // [QTBUG-37998] QQuickImageProvider can block its separate thread with ForceAsynchronousImageLoading
-    // Link: https://bugreports.qt.io/browse/QTBUG-37988
+    if (m_engine)
+        return;
 
-    // WORKAROUND: ARM SoCs can disable some of their cores when the load is not particulary high.
-    // This causes a wrong value for the "newProvidersNumber" variable.
-    // We hard-code its value to 4 (which is the number of available core on all the supported devices).
-    //    int newProvidersNumber = QThread::idealThreadCount();
-    int newProvidersNumber = 4;
+    // Poppler::Document is not safe for concurrent rendering. Keep requests
+    // asynchronous while using one provider for this document.
+    int newProvidersNumber = 1;
 
     if (newProvidersNumber != m_providersNumber) {
         m_providersNumber = newProvidersNumber;
@@ -394,11 +872,19 @@ void PdfDocument::loadProvider()
     qDebug() << "Ideal number of image providers is:" << m_providersNumber;
 
     qDebug() << "Loading image provider(s)...";
-    QQmlEngine *engine = QQmlEngine::contextForObject(this)->engine();
+    QQmlContext *context = QQmlEngine::contextForObject(this);
+    if (!context)
+        return;
+
+    QQmlEngine *engine = context->engine();
+    if (!engine)
+        return;
+
+    m_engine = engine;
 
     for (int i=0; i<m_providersNumber; i++)
     {
-        engine->addImageProvider(m_id+QByteArray::number(i), new PdfImageProvider(m_document.get()));
+        engine->addImageProvider(m_id+QByteArray::number(i), new PdfImageProvider(m_providerState));
     }
 
     qDebug() << "Image provider(s) loaded successfully !";
@@ -406,4 +892,11 @@ void PdfDocument::loadProvider()
 
 PdfDocument::~PdfDocument()
 {
+    if (m_providerState)
+    {
+        QMutexLocker locker(&m_providerState->mutex);
+        m_providerState->document = nullptr;
+        m_providerState->tileCache.clear();
+    }
+
 }

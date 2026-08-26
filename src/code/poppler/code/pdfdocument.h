@@ -20,12 +20,19 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QPointer>
+#include <QVariantList>
+#include <QVariantMap>
+#include <QQmlEngine>
+#include <memory>
 
 #include <poppler/qt6/poppler-qt6.h>
 
 #include "pdfitem.h"
 #include "pdftocmodel.h"
 #include <QUrl>
+
+class PdfImageProviderState;
 
 // typedef std::list<std::unique_ptr<Poppler::Page>> PdfPagesList;
 
@@ -48,6 +55,13 @@ class PdfDocument : public QAbstractListModel
     Q_PROPERTY(bool isLocked READ isLocked NOTIFY isLockedChanged FINAL)
     Q_PROPERTY(bool isValid READ isValid NOTIFY isValidChanged FINAL)
     Q_PROPERTY(QString id READ id CONSTANT FINAL)
+    Q_PROPERTY(QVariantList formFields READ formFields NOTIFY formFieldsChanged)
+    Q_PROPERTY(QVariantList annotations READ annotations NOTIFY annotationsChanged)
+    Q_PROPERTY(bool modified READ isModified NOTIFY modifiedChanged)
+    Q_PROPERTY(int renderRevision READ renderRevision NOTIFY renderRevisionChanged)
+    Q_PROPERTY(bool supportsForms READ supportsForms NOTIFY capabilitiesChanged)
+    Q_PROPERTY(bool supportsAnnotations READ supportsAnnotations NOTIFY capabilitiesChanged)
+    Q_PROPERTY(bool supportsSavingChanges READ supportsSavingChanges NOTIFY capabilitiesChanged)
 
 public:
     enum Roles {
@@ -84,6 +98,14 @@ public:
 
     QString id() const;
 
+    QVariantList formFields() const;
+    QVariantList annotations() const;
+    bool isModified() const { return m_modified; }
+    int renderRevision() const { return m_renderRevision; }
+    bool supportsForms() const { return m_supportsForms; }
+    bool supportsAnnotations() const { return m_supportsAnnotations; }
+    bool supportsSavingChanges() const { return m_supportsSavingChanges; }
+
 Q_SIGNALS:
     void pathChanged();
     void error(const QString& errorMessage);
@@ -97,6 +119,11 @@ Q_SIGNALS:
     void isLockedChanged();
 
     void isValidChanged();
+    void formFieldsChanged();
+    void annotationsChanged();
+    void modifiedChanged();
+    void renderRevisionChanged();
+    void capabilitiesChanged();
 
 private Q_SLOTS:
     // void _q_populate(PdfPagesList pagesList);
@@ -105,6 +132,12 @@ public Q_SLOTS:
     void unlock(const QString &ownerPassword, const QString &password);
     QVariantList search(int page, const QString& text, Qt::CaseSensitivity caseSensitivity = Qt::CaseSensitive);
     QString getText(const QRectF &rect,const QSize &pageSize, int page);
+    Q_INVOKABLE bool setFormFieldValue(int page, int id, const QVariant &value);
+    Q_INVOKABLE bool setAnnotationProperties(int page, int index, const QVariantMap &properties);
+    Q_INVOKABLE bool addTextAnnotation(int page, const QRectF &rect, const QString &contents, const QString &author = QString());
+    Q_INVOKABLE bool removeAnnotation(int page, int index);
+    Q_INVOKABLE bool saveChanges();
+    Q_INVOKABLE bool saveChangesAs(const QUrl &outputPath);
     
 private:
     QUrl m_path;
@@ -115,13 +148,22 @@ private:
     bool loadDocument(const QString &pathName, const QString &password = QString(), const QString &userPassword = QString());
     void loadProvider();
     bool loadPages();
+    bool saveToPath(const QString &outputPath);
+    void markModified();
 
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     Poppler::Document *m_document;
 #else
     std::unique_ptr<Poppler::Document> m_document;
 #endif
+    std::shared_ptr<PdfImageProviderState> m_providerState;
+    QPointer<QQmlEngine> m_engine;
     QList<PdfItem> m_pages;
     PdfTocModel* m_tocModel;
     bool m_isValid = false;
+    bool m_supportsForms = false;
+    bool m_supportsAnnotations = false;
+    bool m_supportsSavingChanges = false;
+    bool m_modified = false;
+    int m_renderRevision = 0;
 };

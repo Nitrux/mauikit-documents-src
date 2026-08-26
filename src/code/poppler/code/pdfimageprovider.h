@@ -19,17 +19,36 @@
 
 #pragma once
 
+#include <QCache>
+#include <QImage>
+#include <QMutex>
+#include <memory>
 #include <QQuickImageProvider>
 #include <poppler/qt6/poppler-qt6.h>
+
+QMutex &popplerRenderMutex();
+
+class PdfImageProviderState
+{
+public:
+    PdfImageProviderState()
+    {
+        tileCache.setMaxCost(64 * 1024 * 1024);
+    }
+
+    QMutex mutex;
+    Poppler::Document *document = nullptr;
+    QCache<QString, QImage> tileCache;
+};
 
 class PdfImageProvider : public QQuickImageProvider
 {
 public:
-    PdfImageProvider(Poppler::Document *pdfDocument);
+    explicit PdfImageProvider(const std::shared_ptr<PdfImageProviderState> &providerState);
 
     QImage requestImage(const QString & id, QSize * size, const QSize & requestedSize) override;
 
 private:
-    Poppler::Document *document;
+    std::shared_ptr<PdfImageProviderState> providerState;
 };
 

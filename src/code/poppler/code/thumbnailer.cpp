@@ -1,10 +1,12 @@
 #include "thumbnailer.h"
+#include "pdfimageprovider.h"
 
 #include <poppler/qt6/poppler-qt6.h>
 
 #include <QImage>
 #include <QUrl>
 #include <QIcon>
+#include <QMutexLocker>
 
 Thumbnailer::Thumbnailer() : QQuickImageProvider(QQuickImageProvider::Image, QQuickImageProvider::ForceAsynchronousImageLoading)
 {
@@ -13,6 +15,7 @@ Thumbnailer::Thumbnailer() : QQuickImageProvider(QQuickImageProvider::Image, QQu
 
 QImage Thumbnailer::requestImage(const QString &id, QSize *size, const QSize &requestedSize)
 {
+    QMutexLocker popplerLocker(&popplerRenderMutex());
     qDebug() << "REQUESTED URL IS" << id << requestedSize;
     QImage result;
 

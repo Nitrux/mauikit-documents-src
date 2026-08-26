@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Window
 import QtQuick.Layouts
 
 import org.mauikit.controls as Maui
@@ -14,8 +15,8 @@ import org.mauikit.documents as Poppler
  * zoomBy() control magnification. search() maintains the current result state,
  * while selectedText, clearSelection(), and copySelection() expose selection.
  *
- * The supportsForms, supportsAnnotations, and supportsSavingChanges capability
- * flags are currently false, and saveChanges() therefore performs no write.
+ * Form fields and annotations are exposed through the document model. Changes can
+ * be saved with saveChanges() or saveChangesAs().
  */
 Maui.Page
 {
@@ -29,10 +30,12 @@ Maui.Page
     property color searchHighlightColor: Qt.rgba(1, 1, .2, .4)
 
     // Capability flags for host apps such as Shelf.
-    readonly property bool supportsForms: false
-    readonly property bool supportsAnnotations: false
-    readonly property bool supportsSavingChanges: false
-    readonly property bool hasPendingChanges: false
+    readonly property bool supportsForms: poppler.supportsForms
+    readonly property bool supportsAnnotations: poppler.supportsAnnotations
+    readonly property bool supportsSavingChanges: poppler.supportsSavingChanges
+    readonly property bool hasPendingChanges: poppler.modified
+    readonly property var formFields: poppler.formFields
+    readonly property var annotations: poppler.annotations
 
     // Host apps can keep their own search UI and drive the shared viewer API.
     property bool showSearchControls: true
@@ -98,7 +101,28 @@ Maui.Page
         title: i18n("Document Locked")
         message: i18n("Please enter your password to unlock and open the file.")
         textEntry.echoMode: TextInput.Password
-        onFinished: poppler.unlock(text, text)
+        onFinished: (text) => poppler.unlock(text, text)
+    }
+
+    Maui.InputDialog
+    {
+        id: _annotationDialog
+
+        property bool editing: false
+        property int annotationPage: -1
+        property int annotationIndex: -1
+        property rect annotationRect: Qt.rect(0, 0, 0, 0)
+
+        title: editing ? i18n("Edit Annotation") : i18n("Add Annotation")
+        message: editing ? i18n("Update the annotation text.") : i18n("Enter the annotation text.")
+        onFinished: (text) =>
+        {
+            if (editing)
+                poppler.setAnnotationProperties(annotationPage, annotationIndex, { "contents": text })
+            else if (annotationPage >= 0)
+                poppler.addTextAnnotation(annotationPage, annotationRect, text)
+            editing = false
+        }
     }
 
     footerColumn: Maui.ToolBar
@@ -181,8 +205,16 @@ Maui.Page
 
         orientation: ListView.Vertical
         snapMode: control.pageScale === 1.0 ? ListView.SnapOneItem : ListView.NoSnap
-        flickable.onContentXChanged: control._updateCurrentPage()
-        flickable.onContentYChanged: control._updateCurrentPage()
+        flickable.onContentXChanged:
+        {
+            control._updateCurrentPage()
+            control._updateVisibleTiles()
+        }
+        flickable.onContentYChanged:
+        {
+            control._updateCurrentPage()
+            control._updateVisibleTiles()
+        }
 
         delegate: Item
         {
@@ -191,6 +223,186 @@ Maui.Page
             property bool panning: false
             property real panLastX: 0
             property real panLastY: 0
+            readonly property real deviceScale: Math.max(1, Screen.devicePixelRatio)
+            property bool previewRendering: false
+            property bool zoomPreviewPending: false
+            readonly property int renderWidth: Math.max(1, Math.ceil(pageSurface.width * deviceScale
+                                                                     * (previewRendering ? 1 / Math.max(1, control.pageScale) : 1)))
+            readonly property int renderHeight: Math.max(1, Math.ceil(renderWidth * model.height / model.width))
+            property string requestedRegionKey: ""
+            property var pendingRegionImage: null
+            property bool firstRegionImageActive: true
+
+            Timer
+            {
+                id: regionUpdateTimer
+                interval: 50
+                repeat: false
+                onTriggered:
+                {
+                    zoomPreviewPending = false
+                    updateVisibleRegion()
+                }
+            }
+
+            Timer
+            {
+                id: zoomFinalTimer
+                interval: 250
+                repeat: false
+                onTriggered:
+                {
+                    pageImg.zoomPreviewPending = false
+                    pageImg.previewRendering = false
+                    pageImg.updateVisibleRegion()
+                }
+            }
+
+            function scheduleTileUpdate(zooming)
+            {
+                if (zooming === true)
+                {
+                    previewRendering = true
+                    zoomPreviewPending = true
+                    zoomFinalTimer.restart()
+                }
+
+                regionUpdateTimer.interval = zoomPreviewPending ? 120 : 50
+                regionUpdateTimer.restart()
+            }
+
+            function clearRegionImages()
+            {
+                requestedRegionKey = ""
+                pendingRegionImage = null
+                regionImageA.source = ""
+                regionImageB.source = ""
+            }
+
+            function updateVisibleRegion()
+            {
+                const view = ListView.view
+                if (!view || pageSurface.width <= 0 || pageSurface.height <= 0 || !pageImg.ListView.isCurrentItem)
+                {
+                    if (requestedRegionKey.length > 0 || pendingRegionImage !== null)
+                        clearRegionImages()
+                    return
+                }
+
+                const scale = renderWidth / pageSurface.width
+                let prefetch = Math.max(view.width, view.height) * 0.25
+                const maxRegionPixels = 8 * 1024 * 1024
+                let regionWidth = Math.min(pageSurface.width, view.width + prefetch * 2)
+                let regionHeight = Math.min(pageSurface.height, view.height + prefetch * 2)
+
+                // Keep the prefetched image within a predictable memory budget.
+                for (let attempt = 0; attempt < 8; ++attempt)
+                {
+                    if (regionWidth * regionHeight * scale * scale <= maxRegionPixels || prefetch <= 0)
+                        break
+
+                    prefetch *= 0.75
+                    regionWidth = Math.min(pageSurface.width, view.width + prefetch * 2)
+                    regionHeight = Math.min(pageSurface.height, view.height + prefetch * 2)
+                }
+
+                // Align regions to movement bands so small pans reuse the
+                // current image instead of starting a render for every pixel.
+                const viewportLeft = Math.max(0, view.contentX - pageImg.x - pageSurface.x)
+                const viewportTop = Math.max(0, view.contentY - pageImg.y - pageSurface.y)
+                const horizontalStep = Math.max(1, regionWidth - Math.min(view.width, pageSurface.width))
+                const verticalStep = Math.max(1, regionHeight - Math.min(view.height, pageSurface.height))
+                const maxLeft = Math.max(0, pageSurface.width - regionWidth)
+                const maxTop = Math.max(0, pageSurface.height - regionHeight)
+                const left = Math.max(0, Math.min(Math.floor(viewportLeft / horizontalStep) * horizontalStep, maxLeft))
+                const top = Math.max(0, Math.min(Math.floor(viewportTop / verticalStep) * verticalStep, maxTop))
+                const x = Math.max(0, Math.floor(left * scale))
+                const y = Math.max(0, Math.floor(top * scale))
+                const right = Math.min(renderWidth, Math.ceil((left + regionWidth) * scale))
+                const bottom = Math.min(renderHeight, Math.ceil((top + regionHeight) * scale))
+                const width = right - x
+                const height = bottom - y
+
+                if (width <= 0 || height <= 0)
+                    return
+
+                const source = model.url + "/region/" + renderWidth + "/" + x + "/" + y + "/" + width + "/" + height + "/revision/" + poppler.renderRevision
+                if (source === requestedRegionKey)
+                    return
+
+                requestedRegionKey = source
+                const target = firstRegionImageActive ? regionImageB : regionImageA
+                target.source = ""
+                target.x = x / scale
+                target.y = y / scale
+                target.width = width / scale
+                target.height = height / scale
+                target.regionWidthPx = width
+                target.regionHeightPx = height
+                pendingRegionImage = target
+                target.source = source
+            }
+
+            function regionImageStatusChanged(image)
+            {
+                if (image !== pendingRegionImage)
+                    return
+
+                if (image.status === Image.Ready)
+                {
+                    firstRegionImageActive = image === regionImageA
+                    pendingRegionImage = null
+                }
+                else if (image.status === Image.Error)
+                {
+                    pendingRegionImage = null
+                }
+            }
+
+            onWidthChanged: scheduleTileUpdate()
+            onHeightChanged: scheduleTileUpdate()
+            Component.onCompleted: scheduleTileUpdate()
+
+            Connections
+            {
+                target: ListView.view
+                function onCurrentItemChanged()
+                {
+                    pageImg.scheduleTileUpdate()
+                }
+            }
+
+            Connections
+            {
+                target: control
+                function onPageScaleChanged()
+                {
+                    pageImg.scheduleTileUpdate(true)
+                }
+            }
+
+            Connections
+            {
+                target: poppler
+                function onRenderRevisionChanged()
+                {
+                    if (pageImg.ListView.isCurrentItem)
+                        pageImg.scheduleTileUpdate()
+                }
+            }
+
+            Connections
+            {
+                target: pageSurface
+                function onWidthChanged()
+                {
+                    pageImg.scheduleTileUpdate()
+                }
+                function onHeightChanged()
+                {
+                    pageImg.scheduleTileUpdate()
+                }
+            }
 
             readonly property real fitScale: Math.min(ListView.view.width / model.width,
                                                       ListView.view.height / model.height)
@@ -246,25 +458,51 @@ Maui.Page
                 width: pageImg.pageWidth
                 height: pageImg.pageHeight
 
-                Image
+                Item
                 {
                     id: pageImage
-
                     anchors.fill: parent
-                    asynchronous: true
-                    cache: false
-                    autoTransform: true
-                    fillMode: Image.PreserveAspectFit
-                    source: model.url
-                    sourceSize.width: model.width * (1000 / model.width)
-                    sourceSize.height: model.height * (1000 / model.height)
+                    readonly property real paintedWidth: width
+                    readonly property real paintedHeight: height
+
+                    Image
+                    {
+                        id: regionImageA
+                        visible: pageImg.firstRegionImageActive
+                        asynchronous: true
+                        cache: true
+                        autoTransform: true
+                        fillMode: Image.Stretch
+                        smooth: true
+                        property int regionWidthPx: 0
+                        property int regionHeightPx: 0
+                        sourceSize.width: regionWidthPx
+                        sourceSize.height: regionHeightPx
+                        onStatusChanged: pageImg.regionImageStatusChanged(this)
+                    }
+
+                    Image
+                    {
+                        id: regionImageB
+                        visible: !pageImg.firstRegionImageActive
+                        asynchronous: true
+                        cache: true
+                        autoTransform: true
+                        fillMode: Image.Stretch
+                        smooth: true
+                        property int regionWidthPx: 0
+                        property int regionHeightPx: 0
+                        sourceSize.width: regionWidthPx
+                        sourceSize.height: regionHeightPx
+                        onStatusChanged: pageImg.regionImageStatusChanged(this)
+                    }
                 }
 
                 Maui.ProgressIndicator
                 {
                     width: parent.width
                     anchors.bottom: parent.bottom
-                    visible: pageImage.status === Image.Loading
+                    visible: pageImg.pendingRegionImage !== null
                 }
             }
 
@@ -393,6 +631,20 @@ Maui.Page
                 {
                     id: _menu
                     property string selectedText
+
+                    MenuItem
+                    {
+                        text: i18n("Add Note")
+                        enabled: selectLayer.width > 0 && selectLayer.height > 0
+                        onTriggered:
+                        {
+                            _annotationDialog.editing = false
+                            _annotationDialog.annotationPage = pageImg.page
+                            _annotationDialog.annotationRect = pageImg.selectionPageRect
+                            _annotationDialog.textEntry.text = ""
+                            _annotationDialog.open()
+                        }
+                    }
 
                     MenuItem
                     {
@@ -581,6 +833,184 @@ Maui.Page
                     }
                 }
             }
+
+            Item
+            {
+                id: annotationLayer
+
+                parent: pageSurface
+                anchors.fill: parent
+                z: 5
+
+                Repeater
+                {
+                    model: poppler.annotations
+
+                    delegate: Item
+                    {
+                        id: annotationItem
+                        property var annotation: modelData
+                        visible: annotation.page === pageImg.page && annotation.rect.width > 0 && annotation.rect.height > 0
+                        x: annotation.rect.x * annotationLayer.width
+                        y: annotation.rect.y * annotationLayer.height
+                        width: annotation.rect.width * annotationLayer.width
+                        height: annotation.rect.height * annotationLayer.height
+
+                        MouseArea
+                        {
+                            anchors.fill: parent
+                            acceptedButtons: Qt.RightButton
+                            onClicked: (mouse) =>
+                            {
+                                annotationMenu.annotationPage = annotationItem.annotation.page
+                                annotationMenu.annotationIndex = annotationItem.annotation.index
+                                annotationMenu.annotationContents = annotationItem.annotation.contents || ""
+                                annotationMenu.annotationType = annotationItem.annotation.type
+                                annotationMenu.show()
+                                mouse.accepted = true
+                            }
+                        }
+
+                        Maui.ContextualMenu
+                        {
+                            id: annotationMenu
+                            property int annotationPage: -1
+                            property int annotationIndex: -1
+                            property string annotationContents: ""
+                            property string annotationType: ""
+
+                            MenuItem
+                            {
+                                visible: annotationMenu.annotationType === "text" || annotationMenu.annotationType === "highlight"
+                                text: i18n("Edit Annotation")
+                                onTriggered:
+                                {
+                                    _annotationDialog.editing = true
+                                    _annotationDialog.annotationPage = annotationMenu.annotationPage
+                                    _annotationDialog.annotationIndex = annotationMenu.annotationIndex
+                                    _annotationDialog.textEntry.text = annotationMenu.annotationContents
+                                    _annotationDialog.open()
+                                }
+                            }
+
+                            MenuItem
+                            {
+                                text: i18n("Delete Annotation")
+                                onTriggered: poppler.removeAnnotation(annotationMenu.annotationPage, annotationMenu.annotationIndex)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Item
+            {
+                id: formFieldsLayer
+
+                parent: pageSurface
+                anchors.fill: parent
+                z: 10
+
+                Repeater
+                {
+                    model: poppler.formFields
+
+                    delegate: Item
+                    {
+                        id: fieldItem
+                        property var field: modelData
+                        visible: field.page === pageImg.page && field.visible && field.rect.width > 0 && field.rect.height > 0
+                        x: field.rect.x * formFieldsLayer.width
+                        y: field.rect.y * formFieldsLayer.height
+                        width: field.rect.width * formFieldsLayer.width
+                        height: field.rect.height * formFieldsLayer.height
+
+                        Loader
+                        {
+                            anchors.fill: parent
+                            active: fieldItem.visible && !fieldItem.field.readOnly
+                            sourceComponent:
+                            {
+                                if (fieldItem.field.type === "text")
+                                    return fieldItem.field.multiline ? multilineField : textField
+                                if (fieldItem.field.type === "combobox" || fieldItem.field.type === "listbox")
+                                    return choiceField
+                                if (fieldItem.field.type === "checkbox")
+                                    return checkField
+                                if (fieldItem.field.type === "radio")
+                                    return radioField
+                                return null
+                            }
+                        }
+
+                        Component
+                        {
+                            id: textField
+                            Maui.TextField
+                            {
+                                text: fieldItem.field.value || ""
+                                echoMode: fieldItem.field.password ? TextInput.Password : TextInput.Normal
+                                selectByMouse: true
+                                onEditingFinished: poppler.setFormFieldValue(fieldItem.field.page, fieldItem.field.id, text)
+                            }
+                        }
+
+                        Component
+                        {
+                            id: multilineField
+                            TextArea
+                            {
+                                text: fieldItem.field.value || ""
+                                wrapMode: TextEdit.Wrap
+                                selectByMouse: true
+                                onFocusChanged:
+                                {
+                                    if (!focus)
+                                        poppler.setFormFieldValue(fieldItem.field.page, fieldItem.field.id, text)
+                                }
+                            }
+                        }
+
+                        Component
+                        {
+                            id: choiceField
+                            ComboBox
+                            {
+                                model: fieldItem.field.choices || []
+                                currentIndex: fieldItem.field.currentChoices && fieldItem.field.currentChoices.length > 0
+                                              ? fieldItem.field.currentChoices[0] : -1
+                                editable: fieldItem.field.editable || false
+                                onActivated: (index) => poppler.setFormFieldValue(fieldItem.field.page, fieldItem.field.id, index)
+                                onAccepted:
+                                {
+                                    if (editable)
+                                        poppler.setFormFieldValue(fieldItem.field.page, fieldItem.field.id, editText)
+                                }
+                            }
+                        }
+
+                        Component
+                        {
+                            id: checkField
+                            CheckBox
+                            {
+                                checked: fieldItem.field.checked || false
+                                onToggled: poppler.setFormFieldValue(fieldItem.field.page, fieldItem.field.id, checked)
+                            }
+                        }
+
+                        Component
+                        {
+                            id: radioField
+                            RadioButton
+                            {
+                                checked: fieldItem.field.checked || false
+                                onToggled: poppler.setFormFieldValue(fieldItem.field.page, fieldItem.field.id, checked)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -618,9 +1048,9 @@ Maui.Page
             Maui.Handy.copyTextToClipboard(selectedText)
     }
 
-    function saveChanges()
+    function saveChanges(outputPath)
     {
-        return false
+        return outputPath ? poppler.saveChangesAs(outputPath) : poppler.saveChanges()
     }
 
     function goTo(destination)
@@ -667,7 +1097,15 @@ Maui.Page
             }
 
             control._updateCurrentPage()
+            control._updateVisibleTiles()
         })
+    }
+
+    function _updateVisibleTiles()
+    {
+        const page = _listView.flickable.currentItem
+        if (page)
+            page.scheduleTileUpdate()
     }
 
     function _updateCurrentPage()
@@ -714,6 +1152,7 @@ Maui.Page
             }
 
             control._updateCurrentPage()
+            control._updateVisibleTiles()
         })
     }
 
