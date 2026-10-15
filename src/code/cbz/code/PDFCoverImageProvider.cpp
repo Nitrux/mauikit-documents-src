@@ -33,7 +33,9 @@
 #include <QThreadPool>
 #include <QUrl>
 
-#include <qtquick_debug.h>
+#include <QLoggingCategory>
+
+Q_LOGGING_CATEGORY(PDF_COVER_LOG, "org.mauikit.documents.pdfcover")
 
 class PDFCoverImageProvider::Private {
 public:
@@ -176,7 +178,7 @@ void PDFCoverRunnable::run()
         if(!d->isAborted() && !success) {
             QIcon oops = QIcon::fromTheme("application-pdf");
             img = oops.pixmap(oops.availableSizes().last()).toImage();
-            qCDebug(QTQUICK_LOG) << "Failed to load image with id" << d->id << "from thumbnail file" << outFile;
+            qCDebug(PDF_COVER_LOG) << "Failed to load image with id" << d->id << "from thumbnail file" << outFile;
         }
     }
 

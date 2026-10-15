@@ -42,6 +42,7 @@ Maui.Page
     property bool searchVisible: false
 
     property real pageScale: 1.0
+    property int __navigationTargetPage: -1
 
     readonly property int totalPages: poppler.pages
     readonly property var tocModel: poppler.tocModel
@@ -428,9 +429,7 @@ Maui.Page
             function panBy(deltaX, deltaY)
             {
                 const view = ListView.view
-                const contentWidth = Math.max(view.contentWidth, pageImg.x + pageImg.width)
-                if (view.contentWidth < contentWidth)
-                    view.contentWidth = contentWidth
+                const contentWidth = control._syncContentWidth(pageImg)
                 const maxX = Math.max(0, contentWidth - view.width)
                 const maxY = Math.max(0, view.contentHeight - view.height)
                 view.contentX = clamp(view.contentX - deltaX, 0, maxX)
@@ -697,18 +696,21 @@ Maui.Page
                         {
                             if (_mouseArea.pressed && control.enableLassoSelection && selectLayer.visible)
                             {
-                                if (mouseX >= selectLayer.newX)
+                                const x = Math.max(0, Math.min(mouse.x, pageSurface.width))
+                                const y = Math.max(0, Math.min(mouse.y, pageSurface.height))
+
+                                if (x >= selectLayer.newX)
                                 {
-                                    selectLayer.width = (mouseX + 10) < (control.x + control.width) ? (mouseX - selectLayer.x) : selectLayer.width
+                                    selectLayer.width = x - selectLayer.x
                                 } else {
-                                    selectLayer.x = mouseX < control.x ? control.x : mouseX
+                                    selectLayer.x = x
                                     selectLayer.width = selectLayer.newX - selectLayer.x
                                 }
 
-                                if (mouseY >= selectLayer.newY) {
-                                    selectLayer.height = (mouseY + 10) < (control.y + control.height) ? (mouseY - selectLayer.y) : selectLayer.height
+                                if (y >= selectLayer.newY) {
+                                    selectLayer.height = y - selectLayer.y
                                 } else {
-                                    selectLayer.y = mouseY < control.y ? control.y : mouseY
+                                    selectLayer.y = y
                                     selectLayer.height = selectLayer.newY - selectLayer.y
                                 }
                             }
@@ -1053,10 +1055,54 @@ Maui.Page
         return outputPath ? poppler.saveChangesAs(outputPath) : poppler.saveChanges()
     }
 
+    function _syncContentWidth(page)
+    {
+        const view = _listView.flickable
+        const pageRight = page.x + page.width
+        if (view.orientation === ListView.Vertical)
+            view.contentWidth = Math.max(view.width, pageRight)
+        else
+            view.contentWidth = Math.max(view.contentWidth, pageRight)
+
+        return view.contentWidth
+    }
+
     function goTo(destination)
     {
-        _listView.currentIndex = destination.page
-        _listView.flickable.positionViewAtIndex(destination.page, ListView.Beginning)
+        const view = _listView.flickable
+        const page = Math.max(0, Math.min(destination.page, view.count - 1))
+        if (view.count === 0)
+            return
+
+        __navigationTargetPage = page
+
+        view.currentIndex = page
+
+        Qt.callLater(function()
+        {
+            view.forceLayout()
+            view.positionViewAtIndex(page, ListView.Beginning)
+
+            const pageItem = view.itemAtIndex(page)
+            if (pageItem)
+            {
+                const contentWidth = control._syncContentWidth(pageItem)
+                const maxX = Math.max(0, contentWidth - view.width)
+                const maxY = Math.max(0, view.contentHeight - view.height)
+
+                if (view.orientation === ListView.Vertical)
+                    view.contentX = 0
+                else
+                    view.contentY = 0
+
+                view.contentX = Math.max(0, Math.min(view.contentX, maxX))
+                view.contentY = Math.max(0, Math.min(view.contentY, maxY))
+            }
+
+            if (__navigationTargetPage === page)
+                __navigationTargetPage = -1
+            control._updateVisibleTiles()
+        })
     }
 
     function zoomBy(delta)
@@ -1087,9 +1133,7 @@ Maui.Page
             const resizedPage = view.itemAtIndex(pageIndex)
             if (resizedPage)
             {
-                const contentWidth = Math.max(view.contentWidth, resizedPage.x + resizedPage.width)
-                if (view.contentWidth < contentWidth)
-                    view.contentWidth = contentWidth
+                const contentWidth = control._syncContentWidth(resizedPage)
                 const maxX = Math.max(0, contentWidth - view.width)
                 const maxY = Math.max(0, view.contentHeight - view.height)
                 view.contentX = Math.max(0, Math.min(resizedPage.x + pagePositionX * resizedPage.width - anchorX, maxX))
@@ -1110,6 +1154,9 @@ Maui.Page
 
     function _updateCurrentPage()
     {
+        if (__navigationTargetPage >= 0)
+            return
+
         const view = _listView.flickable
         const index = view.indexAt(view.contentX + view.width / 2,
                                    view.contentY + view.height / 2)
@@ -1138,9 +1185,7 @@ Maui.Page
             const resizedPage = view.itemAtIndex(page)
             if (resizedPage)
             {
-                const contentWidth = Math.max(view.contentWidth, resizedPage.x + resizedPage.width)
-                if (view.contentWidth < contentWidth)
-                    view.contentWidth = contentWidth
+                const contentWidth = control._syncContentWidth(resizedPage)
                 const maxX = Math.max(0, contentWidth - view.width)
                 const maxY = Math.max(0, view.contentHeight - view.height)
                 view.contentX = Math.max(0, Math.min(resizedPage.x + pagePositionX * resizedPage.width - view.width / 2, maxX))

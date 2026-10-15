@@ -1,5 +1,5 @@
 #include "moduleinfo.h"
-#include "../documents_version.h"
+#include "documents_version.h"
 #include <KLocalizedString>
 
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
