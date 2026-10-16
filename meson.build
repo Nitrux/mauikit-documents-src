@@ -91,6 +91,7 @@ install_data(configure_file(
     input: 'meson-content.in',
     output: 'qmldir',
     configuration: {'CONTENT': ('''module org.mauikit.documents
+depends org.mauikit.controls
 plugin MauiKitDocuments4plugin
 ''')}
 ), install_dir: qml_dir)
@@ -105,7 +106,8 @@ if(NOT TARGET MauiKitDocuments4)
   add_library(MauiKitDocuments4 SHARED IMPORTED)
   set_target_properties(MauiKitDocuments4 PROPERTIES
     IMPORTED_LOCATION "${_MAUIKIT_PREFIX}/@LIBDIR@/libMauiKitDocuments4.so.4.0.5"
-    INTERFACE_INCLUDE_DIRECTORIES "${_MAUIKIT_PREFIX}/include/MauiKit4/Documents")
+    INTERFACE_INCLUDE_DIRECTORIES "${_MAUIKIT_PREFIX}/include/MauiKit4/Documents"
+    INTERFACE_LINK_LIBRARIES "Qt6::Concurrent;Qt6::Core;Qt6::Gui;Qt6::Multimedia;Qt6::Network;Qt6::Qml;Qt6::Quick;Qt6::Sql;KF6::Archive;KF6::ConfigCore;KF6::CoreAddons;KF6::FileMetaData;KF6::GuiAddons;KF6::I18n;KF6::IconThemes;KF6::KIOCore;KF6::KIOGui;MauiKit4;Poppler::Qt6;ZLIB::ZLIB")
 endif()
 if(NOT TARGET MauiKit4::Documents)
   add_library(MauiKit4::Documents ALIAS MauiKitDocuments4)
@@ -119,7 +121,11 @@ cmake_config = configure_file(
     input: 'meson-content.in',
     output: 'MauiKitDocuments4Config.cmake',
     configuration: {'CONTENT': ('''include(CMakeFindDependencyMacro)
-find_dependency(Qt6 6.4 COMPONENTS Core)
+find_dependency(Qt6 6.4 COMPONENTS Concurrent Core Gui Multimedia Network Qml Quick Sql)
+find_dependency(KF6 6.13.0 COMPONENTS Archive Config CoreAddons FileMetaData GuiAddons I18n IconThemes KIO)
+find_dependency(MauiKit4 4.0.5 CONFIG)
+find_dependency(Poppler COMPONENTS Qt6)
+find_dependency(ZLIB)
 include("${CMAKE_CURRENT_LIST_DIR}/MauiKitDocuments4Targets.cmake")
 set(MauiKitDocuments4_FOUND TRUE)
 ''')}
@@ -137,3 +143,20 @@ endif()
 ''')).replace('@VERSION@', (meson.project_version()))}
 )
 install_data([cmake_targets, cmake_config, cmake_version], install_dir: get_option('libdir') / 'cmake' / 'MauiKitDocuments4')
+
+translation_domain = 'mauikitdocuments'
+msgfmt = find_program('msgfmt')
+po_files = run_command('find', 'po', '-mindepth', '2', '-maxdepth', '2', '-type', 'f', '-name', translation_domain + '.po', check: true).stdout().strip().split('\n')
+foreach po_file : po_files
+    if po_file != ''
+        locale = po_file.split('/')[1]
+        custom_target(
+            'translation-' + locale,
+            input: po_file,
+            output: locale / (translation_domain + '.mo'),
+            command: [msgfmt, '--check', '-o', '@OUTPUT@', '@INPUT@'],
+            install: true,
+            install_dir: get_option('localedir') / locale / 'LC_MESSAGES',
+            install_tag: 'i18n')
+    endif
+endforeach
