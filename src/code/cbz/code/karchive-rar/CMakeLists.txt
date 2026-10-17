@@ -47,6 +47,7 @@ set(karchive_rar_SRCS
 add_library (krarlib
     STATIC
     ${karchive_rar_SRCS})
+set_property(TARGET krarlib PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(krarlib
     PUBLIC

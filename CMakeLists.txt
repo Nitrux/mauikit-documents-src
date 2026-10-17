@@ -35,6 +35,14 @@ set(AUTOMOC_MOC_OPTIONS -Muri=org.mauikit.documents)
 
 project(Documents LANGUAGES CXX VERSION ${MAUIKIT_RELEASE_VERSION})
 
+include_directories("${CMAKE_CURRENT_BINARY_DIR}")
+
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-Wno-sfinae-incomplete" DOCUMENTS_HAS_NO_SFINAE_INCOMPLETE)
+if(DOCUMENTS_HAS_NO_SFINAE_INCOMPLETE)
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Wno-sfinae-incomplete>")
+endif()
+
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "This project supports Linux only.")
