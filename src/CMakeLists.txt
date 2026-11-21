@@ -87,3 +87,19 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/documents_export.h
     DESTINATION ${KDE_INSTALL_INCLUDEDIR}/MauiKit${MAUI_MAJOR_VERSION}/Documents
     COMPONENT Devel)
+
+target_precompile_headers(MauiKitDocuments${MAUI_MAJOR_VERSION} PRIVATE
+    <QDebug>
+    <QFileInfo>
+    <QGuiApplication>
+    <QQmlEngine>
+    <QQuickWindow>
+)
+
+target_precompile_headers(MauiKitDocuments${MAUI_MAJOR_VERSION}plugin PRIVATE
+    <QDebug>
+    <QFileInfo>
+    <QGuiApplication>
+    <QQmlEngine>
+    <QQuickWindow>
+)
